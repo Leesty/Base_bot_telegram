@@ -1,0 +1,29 @@
+# Секреты
+.env
+
+# Базы данных (CSV)
+*.csv
+
+# Файлы с данными пользователей
+admins.txt
+users.txt
+support_topics.csv
+user_limits.csv
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.Python
+venv/
+.venv/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
