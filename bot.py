@@ -55,6 +55,7 @@ USER_LIMITS_FILE = "user_limits.csv"
 
 # Карта названий листов Excel -> внутренние ключи (для загрузки через админку)
 EXCEL_SHEET_MAP = {
+    # Короткие названия
     "Тг": "telegram",
     "ТГ": "telegram",
     "Вотсап": "whatsapp",
@@ -64,6 +65,31 @@ EXCEL_SHEET_MAP = {
     "ВК": "vk",
     "Ок": "ok",
     "Почта": "email",
+    # Полные названия
+    "Telegram": "telegram",
+    "telegram": "telegram",
+    "WhatsApp": "whatsapp",
+    "Whatsapp": "whatsapp",
+    "whatsapp": "whatsapp",
+    "Max": "max",
+    "max": "max",
+    "Viber": "viber",
+    "viber": "viber",
+    "Нельзяграм": "instagram",
+    "Нельзяграм (там где Reels)": "instagram",
+    "Instagram": "instagram",
+    "instagram": "instagram",
+    "ВКонтакте": "vk",
+    "Вконтакте": "vk",
+    "вконтакте": "vk",
+    "VK": "vk",
+    "Одноклассники": "ok",
+    "одноклассники": "ok",
+    "OK": "ok",
+    "Ok": "ok",
+    "Email": "email",
+    "email": "email",
+    "Почты": "email",
 }
 
 # ============ НАЧАЛЬНАЯ ЗАГРУЗКА (ОТКЛЮЧЕНА) ============
@@ -642,40 +668,93 @@ async def on_download_db(message: Message) -> None:
 
 
 async def on_stats(message: Message) -> None:
-    """Статистика свободных контактов в базе (только для группы админов)."""
+    """Статистика свободных контактов и выданных за периоды (только для группы админов)."""
     # Только в группе поддержки
     if message.chat.id != SUPPORT_GROUP_ID:
         return
     
-    def _count_free() -> List[tuple]:
-        stats = []
+    def _count_stats() -> tuple:
+        from datetime import timedelta
+        
+        now = datetime.utcnow()
+        day_ago = now - timedelta(days=1)
+        week_ago = now - timedelta(days=7)
+        month_ago = now - timedelta(days=30)
+        
+        free_stats = []  # (name, free, total)
+        issued_stats = []  # (name, day, week, month)
+        
         for key, info in BASE_TYPES.items():
             csv_path = info["csv"]
             rows = _read_csv(csv_path)
             total = len(rows) - 1  # Минус заголовок
             free = sum(1 for r in rows[1:] if len(r) < 2 or not r[1])
-            used = total - free
-            stats.append((info["name"], free, used, total))
-        return stats
+            free_stats.append((info["name"], free, total))
+            
+            # Считаем выданные за периоды
+            day_count = 0
+            week_count = 0
+            month_count = 0
+            
+            for row in rows[1:]:
+                if len(row) >= 4 and row[3]:  # Есть дата выдачи
+                    try:
+                        # Формат: "YYYY.MM.DD HH:MM:SS"
+                        issued_date = datetime.strptime(row[3], "%Y.%m.%d %H:%M:%S")
+                        if issued_date >= day_ago:
+                            day_count += 1
+                        if issued_date >= week_ago:
+                            week_count += 1
+                        if issued_date >= month_ago:
+                            month_count += 1
+                    except ValueError:
+                        pass
+            
+            issued_stats.append((info["name"], day_count, week_count, month_count))
+        
+        return free_stats, issued_stats
     
-    stats = await asyncio.to_thread(_count_free)
+    free_stats, issued_stats = await asyncio.to_thread(_count_stats)
     
-    lines = ["📊 **Статистика базы контактов:**\n"]
+    # Свободные контакты
+    lines = ["📊 **Свободные контакты:**\n"]
     total_free = 0
     total_all = 0
     
-    for name, free, used, total in stats:
+    for name, free, total in free_stats:
         if free == 0:
             status = "🔴"
         elif free < 100:
             status = "🟡"
         else:
             status = "🟢"
-        lines.append(f"{status} **{name}**: {free} свободных / {total} всего")
+        lines.append(f"{status} **{name}**: {free} / {total}")
         total_free += free
         total_all += total
     
     lines.append(f"\n📦 **Итого**: {total_free} свободных / {total_all} всего")
+    
+    # Выданные за периоды
+    lines.append("\n\n📈 **Выдано контактов:**\n")
+    lines.append("```")
+    lines.append(f"{'Тип':<25} {'Сутки':>7} {'Неделя':>7} {'Месяц':>7}")
+    lines.append("-" * 48)
+    
+    total_day = 0
+    total_week = 0
+    total_month = 0
+    
+    for name, day, week, month in issued_stats:
+        # Обрезаем длинные названия
+        short_name = name[:24] if len(name) > 24 else name
+        lines.append(f"{short_name:<25} {day:>7} {week:>7} {month:>7}")
+        total_day += day
+        total_week += week
+        total_month += month
+    
+    lines.append("-" * 48)
+    lines.append(f"{'ИТОГО':<25} {total_day:>7} {total_week:>7} {total_month:>7}")
+    lines.append("```")
     
     await message.answer("\n".join(lines), parse_mode="Markdown")
 
@@ -932,9 +1011,9 @@ async def on_admin_file_received(message: Message, state: FSMContext, bot: Bot) 
 
                 ws = wb[sheet_name]
                 new_values = []
-                for row in ws.iter_rows(min_row=1, values_only=True):
+                for row in ws.iter_rows(min_row=2, values_only=True):  # min_row=2 — пропускаем заголовок
                     val = clean_value(row[0] if row else None)
-                    if val:
+                    if val and val.lower() not in ("value", "значение", "контакт", "данные"):
                         new_values.append(val)
 
                 if new_values:
@@ -950,9 +1029,9 @@ async def on_admin_file_received(message: Message, state: FSMContext, bot: Bot) 
             # Обрабатываем первый лист для конкретного типа
             ws = wb.active
             new_values = []
-            for row in ws.iter_rows(min_row=1, values_only=True):
+            for row in ws.iter_rows(min_row=2, values_only=True):  # min_row=2 — пропускаем заголовок
                 val = clean_value(row[0] if row else None)
-                if val:
+                if val and val.lower() not in ("value", "значение", "контакт", "данные"):
                     new_values.append(val)
 
             if new_values:
