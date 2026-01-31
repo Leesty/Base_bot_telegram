@@ -53,6 +53,12 @@ USERS_FILE = "users.txt"
 # Файл для хранения дополнительных лимитов (user_id, base_type, extra_limit)
 USER_LIMITS_FILE = "user_limits.csv"
 
+# Файл для хранения статусов пользователей (pending/approved/banned)
+USER_STATUS_FILE = "user_status.csv"
+
+# ID топика для заявок (создаётся автоматически или указать вручную)
+REQUESTS_TOPIC_ID = None  # Будет создан автоматически
+
 # Карта названий листов Excel -> внутренние ключи (для загрузки через админку)
 EXCEL_SHEET_MAP = {
     # Короткие названия
@@ -214,6 +220,61 @@ def set_user_extra_limit(user_id: int, base_type: str, value: int) -> None:
         writer.writerow(["user_id", "base_type", "extra_limit"])
         for (uid, btype), extra in limits.items():
             writer.writerow([uid, btype, extra])
+
+
+# ============ СТАТУСЫ ПОЛЬЗОВАТЕЛЕЙ ============
+# Статусы: pending (ожидает), approved (одобрен), banned (забанен)
+
+def load_user_statuses() -> Dict[int, str]:
+    """Загружает статусы пользователей: {user_id: status}."""
+    statuses = {}
+    if not os.path.exists(USER_STATUS_FILE):
+        return statuses
+    with open(USER_STATUS_FILE, "r", encoding="utf-8", newline="") as f:
+        reader = csv.reader(f)
+        next(reader, None)
+        for row in reader:
+            if len(row) >= 2:
+                try:
+                    user_id = int(row[0])
+                    status = row[1]
+                    statuses[user_id] = status
+                except ValueError:
+                    pass
+    return statuses
+
+
+def get_user_status(user_id: int) -> Optional[str]:
+    """Возвращает статус пользователя (pending/approved/banned) или None если не зарегистрирован."""
+    statuses = load_user_statuses()
+    return statuses.get(user_id)
+
+
+def set_user_status(user_id: int, status: str) -> None:
+    """Устанавливает статус пользователя."""
+    statuses = load_user_statuses()
+    statuses[user_id] = status
+    
+    with open(USER_STATUS_FILE, "w", encoding="utf-8", newline="") as f:
+        writer = csv.writer(f)
+        writer.writerow(["user_id", "status"])
+        for uid, st in statuses.items():
+            writer.writerow([uid, st])
+
+
+def is_user_approved(user_id: int) -> bool:
+    """Проверяет, одобрен ли пользователь."""
+    return get_user_status(user_id) == "approved"
+
+
+def is_user_banned(user_id: int) -> bool:
+    """Проверяет, забанен ли пользователь."""
+    return get_user_status(user_id) == "banned"
+
+
+def is_user_pending(user_id: int) -> bool:
+    """Проверяет, ожидает ли пользователь одобрения."""
+    return get_user_status(user_id) == "pending"
 
 
 # ============ РАБОТА С ТОПИКАМИ ПОДДЕРЖКИ ============
@@ -478,6 +539,16 @@ def get_main_keyboard() -> ReplyKeyboardMarkup:
     )
 
 
+def get_registration_keyboard() -> ReplyKeyboardMarkup:
+    """Клавиатура для регистрации."""
+    return ReplyKeyboardMarkup(
+        keyboard=[
+            [KeyboardButton(text="✅ Отправить приглашение")],
+        ],
+        resize_keyboard=True,
+    )
+
+
 def get_user_choice_keyboard() -> ReplyKeyboardMarkup:
     """Клавиатура выбора типа контактов для пользователя."""
     return ReplyKeyboardMarkup(
@@ -585,19 +656,217 @@ ADMIN_UPLOAD_MAP = {
 
 # ============ ХЕНДЛЕРЫ ============
 
-async def on_start(message: Message, state: FSMContext) -> None:
+async def on_start(message: Message, state: FSMContext, bot: Bot) -> None:
     await state.clear()
     
-    # Сохраняем пользователя в счётчик
-    if message.from_user:
-        save_user(message.from_user.id)
+    user = message.from_user
+    if not user:
+        return
     
+    user_id = user.id
+    status = get_user_status(user_id)
+    
+    # Сохраняем пользователя в счётчик
+    save_user(user_id)
+    
+    # Проверяем статус пользователя
+    if status == "banned":
+        await message.answer(
+            "🚫 Ваш аккаунт заблокирован.\n\n"
+            "Обратитесь к администратору для разблокировки."
+        )
+        return
+    
+    if status == "approved":
+        # Пользователь одобрен — показываем главное меню
+        text = (
+            "Привет!\n\n"
+            "Этот бот выдаёт тебе списки контактов по которым нужно отправлять сообщения.\n\n"
+            "Нажми кнопку ниже, затем выбери соц сеть или мессенджер где тебе удобнее работать."
+        )
+        await message.answer(text, reply_markup=get_main_keyboard())
+        return
+    
+    if status == "pending":
+        # Уже отправил заявку — ждёт одобрения
+        await message.answer(
+            "⏳ Ваша заявка уже отправлена!\n\n"
+            "Ожидайте подтверждения от администратора."
+        )
+        return
+    
+    # Новый пользователь — показываем экран регистрации
     text = (
-        "Привет!\n\n"
-        "Этот бот выдаёт тебе списки контактов по которым нужно отправлять сообщения.\n\n"
-        "Нажми кнопку ниже, затем выбери соц сеть или мессенджер где тебе удобнее работать."
+        "Если вы получили доступ к данному боту, значит вы уже прошли собеседование.\n\n"
+        "Нажмите на кнопку ниже, админ примет приглашение и начнем ✅"
     )
-    await message.answer(text, reply_markup=get_main_keyboard())
+    await message.answer(text, reply_markup=get_registration_keyboard())
+
+
+async def on_send_request(message: Message, bot: Bot) -> None:
+    """Пользователь нажал 'Отправить приглашение'."""
+    user = message.from_user
+    if not user:
+        return
+    
+    # Проверяем что это личный чат
+    if message.chat.type != "private":
+        return
+    
+    user_id = user.id
+    status = get_user_status(user_id)
+    
+    if status == "approved":
+        await message.answer("Вы уже зарегистрированы!", reply_markup=get_main_keyboard())
+        return
+    
+    if status == "pending":
+        await message.answer("⏳ Ваша заявка уже отправлена! Ожидайте подтверждения.")
+        return
+    
+    if status == "banned":
+        await message.answer("🚫 Ваш аккаунт заблокирован.")
+        return
+    
+    # Создаём заявку
+    set_user_status(user_id, "pending")
+    
+    # Создаём топик для пользователя
+    user_name = user.full_name or f"User {user_id}"
+    if user.username:
+        user_name += f" (@{user.username})"
+    
+    try:
+        forum_topic = await bot.create_forum_topic(
+            chat_id=SUPPORT_GROUP_ID,
+            name=f"📝 {user_name[:120]}",
+        )
+        topic_id = forum_topic.message_thread_id
+        save_support_topic(user_id, topic_id)
+        
+        # Отправляем заявку в топик
+        await bot.send_message(
+            chat_id=SUPPORT_GROUP_ID,
+            message_thread_id=topic_id,
+            text=(
+                f"📝 НОВАЯ ЗАЯВКА!\n\n"
+                f"👤 Пользователь: {user.full_name}\n"
+                f"🆔 ID: {user_id}\n"
+                f"📱 Username: @{user.username or 'нет'}\n\n"
+                f"Для одобрения: /add\n"
+                f"Для бана: /ban"
+            ),
+        )
+        
+        await message.answer(
+            "✅ Заявка отправлена!\n\n"
+            "Ожидайте подтверждения от администратора.\n"
+            "Вам придёт уведомление когда заявка будет одобрена."
+        )
+    except Exception as e:
+        set_user_status(user_id, None)  # Откатываем статус
+        await message.answer(f"❌ Ошибка при отправке заявки: {e}")
+
+
+async def on_add_user(message: Message, bot: Bot) -> None:
+    """Команда /add — одобрить пользователя."""
+    if message.chat.id != SUPPORT_GROUP_ID:
+        return
+    
+    topic_id = message.message_thread_id
+    if not topic_id:
+        await message.answer("❌ Эта команда работает только в топике пользователя.")
+        return
+    
+    user_id = get_user_by_topic(topic_id)
+    if not user_id:
+        await message.answer("❌ Пользователь не найден для этого топика.")
+        return
+    
+    status = get_user_status(user_id)
+    if status == "approved":
+        await message.answer("ℹ️ Пользователь уже одобрен.")
+        return
+    
+    set_user_status(user_id, "approved")
+    await message.answer(f"✅ Пользователь {user_id} одобрен!")
+    
+    # Уведомляем пользователя
+    try:
+        await bot.send_message(
+            chat_id=user_id,
+            text=(
+                "🎉 Ваша заявка одобрена!\n\n"
+                "Теперь вы можете пользоваться ботом.\n"
+                "Нажмите /start чтобы начать."
+            ),
+        )
+    except Exception:
+        pass
+
+
+async def on_ban_user(message: Message, bot: Bot) -> None:
+    """Команда /ban — забанить пользователя."""
+    if message.chat.id != SUPPORT_GROUP_ID:
+        return
+    
+    topic_id = message.message_thread_id
+    if not topic_id:
+        await message.answer("❌ Эта команда работает только в топике пользователя.")
+        return
+    
+    user_id = get_user_by_topic(topic_id)
+    if not user_id:
+        await message.answer("❌ Пользователь не найден для этого топика.")
+        return
+    
+    set_user_status(user_id, "banned")
+    await message.answer(f"🚫 Пользователь {user_id} заблокирован!")
+    
+    # Уведомляем пользователя
+    try:
+        await bot.send_message(
+            chat_id=user_id,
+            text="🚫 Ваш аккаунт заблокирован.\n\nОбратитесь к администратору для разблокировки.",
+        )
+    except Exception:
+        pass
+
+
+async def on_unban_user(message: Message, bot: Bot) -> None:
+    """Команда /unban — разбанить пользователя."""
+    if message.chat.id != SUPPORT_GROUP_ID:
+        return
+    
+    topic_id = message.message_thread_id
+    if not topic_id:
+        await message.answer("❌ Эта команда работает только в топике пользователя.")
+        return
+    
+    user_id = get_user_by_topic(topic_id)
+    if not user_id:
+        await message.answer("❌ Пользователь не найден для этого топика.")
+        return
+    
+    status = get_user_status(user_id)
+    if status != "banned":
+        await message.answer("ℹ️ Пользователь не заблокирован.")
+        return
+    
+    set_user_status(user_id, "approved")
+    await message.answer(f"✅ Пользователь {user_id} разблокирован!")
+    
+    # Уведомляем пользователя
+    try:
+        await bot.send_message(
+            chat_id=user_id,
+            text=(
+                "✅ Ваш аккаунт разблокирован!\n\n"
+                "Нажмите /start чтобы продолжить."
+            ),
+        )
+    except Exception:
+        pass
 
 
 async def on_admin_command(message: Message, state: FSMContext) -> None:
@@ -760,6 +1029,11 @@ async def on_stats(message: Message) -> None:
 
 
 async def on_get_base(message: Message, state: FSMContext) -> None:
+    user = message.from_user
+    if not user or not is_user_approved(user.id):
+        await message.answer("❌ У вас нет доступа к этой функции.")
+        return
+    
     await state.clear()
     await message.answer(
         "Выбери, какую базу хочешь получить:",
@@ -767,9 +1041,9 @@ async def on_get_base(message: Message, state: FSMContext) -> None:
     )
 
 
-async def on_back(message: Message, state: FSMContext) -> None:
+async def on_back(message: Message, state: FSMContext, bot: Bot) -> None:
     await state.clear()
-    await on_start(message, state)
+    await on_start(message, state, bot)
 
 
 async def on_user_base_choice(message: Message, state: FSMContext, bot: Bot) -> None:
@@ -777,6 +1051,10 @@ async def on_user_base_choice(message: Message, state: FSMContext, bot: Bot) -> 
     user = message.from_user
     if not user:
         await message.answer("Не удалось определить пользователя.")
+        return
+    
+    if not is_user_approved(user.id):
+        await message.answer("❌ У вас нет доступа к этой функции.")
         return
 
     text = message.text
@@ -1135,40 +1413,47 @@ async def on_user_message_to_support(message: Message, bot: Bot) -> None:
     user = message.from_user
     if not user:
         return
+    
+    # Проверяем статус пользователя
+    if not is_user_approved(user.id):
+        # Если пользователь не одобрен — не пересылаем
+        return
 
     topics = load_support_topics()
     topic_id = topics.get(user.id)
 
-    # Если топика нет — создаём при первом сообщении
-    if not topic_id:
+    async def create_new_topic():
+        """Создаёт новый топик для пользователя."""
         user_name = user.full_name or f"User {user.id}"
         if user.username:
             user_name += f" (@{user.username})"
 
-        try:
-            forum_topic = await bot.create_forum_topic(
-                chat_id=SUPPORT_GROUP_ID,
-                name=user_name[:128],
-            )
-            topic_id = forum_topic.message_thread_id
-            save_support_topic(user.id, topic_id)
+        forum_topic = await bot.create_forum_topic(
+            chat_id=SUPPORT_GROUP_ID,
+            name=user_name[:128],
+        )
+        new_topic_id = forum_topic.message_thread_id
+        save_support_topic(user.id, new_topic_id)
 
-            # Приветственное сообщение в топик
-            await bot.send_message(
-                chat_id=SUPPORT_GROUP_ID,
-                message_thread_id=topic_id,
-                text=(
-                    f"🆕 Новый диалог!\n\n"
-                    f"👤 Пользователь: {user.full_name}\n"
-                    f"🆔 ID: {user.id}\n"
-                    f"📱 Username: @{user.username or 'нет'}"
-                ),
-            )
+        # Приветственное сообщение в топик
+        await bot.send_message(
+            chat_id=SUPPORT_GROUP_ID,
+            message_thread_id=new_topic_id,
+            text=(
+                f"🆕 Новый диалог!\n\n"
+                f"👤 Пользователь: {user.full_name}\n"
+                f"🆔 ID: {user.id}\n"
+                f"📱 Username: @{user.username or 'нет'}"
+            ),
+        )
+        return new_topic_id
+
+    # Если топика нет — создаём
+    if not topic_id:
+        try:
+            topic_id = await create_new_topic()
         except Exception as e:
-            await message.answer(
-                f"❌ Не удалось создать чат с поддержкой. Попробуй позже.\n"
-                f"Ошибка: {e}"
-            )
+            await message.answer(f"❌ Не удалось создать чат с поддержкой: {e}")
             return
 
     try:
@@ -1179,7 +1464,19 @@ async def on_user_message_to_support(message: Message, bot: Bot) -> None:
         )
         await message.answer("✅ Сообщение отправлено в поддержку.")
     except Exception as e:
-        await message.answer(f"❌ Не удалось отправить сообщение: {e}")
+        # Если топик удалён — пересоздаём
+        if "thread not found" in str(e).lower() or "message thread not found" in str(e).lower():
+            try:
+                topic_id = await create_new_topic()
+                await message.forward(
+                    chat_id=SUPPORT_GROUP_ID,
+                    message_thread_id=topic_id,
+                )
+                await message.answer("✅ Сообщение отправлено в поддержку.")
+            except Exception as e2:
+                await message.answer(f"❌ Не удалось отправить сообщение: {e2}")
+        else:
+            await message.answer(f"❌ Не удалось отправить сообщение: {e}")
 
 
 async def on_support_admin_reply(message: Message, bot: Bot) -> None:
@@ -1450,6 +1747,14 @@ async def main() -> None:
     dp.message.register(on_get_online, Command("get_online"))
     dp.message.register(on_download_db, Command("download_db"))
     dp.message.register(on_stats, Command("stats"))
+    
+    # Регистрация пользователя
+    dp.message.register(on_send_request, F.text == "✅ Отправить приглашение")
+    
+    # Команды модерации (в группе поддержки)
+    dp.message.register(on_add_user, Command("add"), F.chat.id == SUPPORT_GROUP_ID)
+    dp.message.register(on_ban_user, Command("ban"), F.chat.id == SUPPORT_GROUP_ID)
+    dp.message.register(on_unban_user, Command("unban"), F.chat.id == SUPPORT_GROUP_ID)
 
     # Админ: состояние ожидания файла (должно быть выше остальных!)
     dp.message.register(
@@ -1505,8 +1810,11 @@ async def main() -> None:
         on_support_admin_reply,
         F.chat.type == "supergroup",
         F.chat.id == SUPPORT_GROUP_ID,
-        ~Command("clear"),  # Исключаем команду /clear
-        ~Command("contacts"),  # Исключаем команду /contacts
+        ~Command("clear"),
+        ~Command("contacts"),
+        ~Command("add"),
+        ~Command("ban"),
+        ~Command("unban"),
     )
     
     # Админ: основные кнопки
