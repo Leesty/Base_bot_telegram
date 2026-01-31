@@ -10,6 +10,7 @@ from aiogram.filters import CommandStart, Command
 from aiogram.types import (
     Message,
     ReplyKeyboardMarkup,
+    ReplyKeyboardRemove,
     KeyboardButton,
     BufferedInputFile,
 )
@@ -540,12 +541,13 @@ def get_main_keyboard() -> ReplyKeyboardMarkup:
 
 
 def get_registration_keyboard() -> ReplyKeyboardMarkup:
-    """Клавиатура для регистрации."""
+    """Клавиатура для регистрации. one_time_keyboard — скрывается после первого нажатия."""
     return ReplyKeyboardMarkup(
         keyboard=[
             [KeyboardButton(text="✅ Отправить приглашение")],
         ],
         resize_keyboard=True,
+        one_time_keyboard=True,
     )
 
 
@@ -688,10 +690,11 @@ async def on_start(message: Message, state: FSMContext, bot: Bot) -> None:
         return
     
     if status == "pending":
-        # Уже отправил заявку — ждёт одобрения
+        # Уже отправил заявку — ждёт одобрения, кнопку убираем
         await message.answer(
             "⏳ Ваша заявка уже отправлена!\n\n"
-            "Ожидайте подтверждения от администратора."
+            "Ожидайте подтверждения от администратора.",
+            reply_markup=ReplyKeyboardRemove(remove_keyboard=True),
         )
         return
     
@@ -721,7 +724,10 @@ async def on_send_request(message: Message, bot: Bot) -> None:
         return
     
     if status == "pending":
-        await message.answer("⏳ Ваша заявка уже отправлена! Ожидайте подтверждения.")
+        await message.answer(
+            "⏳ Ваша заявка уже отправлена! Ожидайте подтверждения.",
+            reply_markup=ReplyKeyboardRemove(remove_keyboard=True),
+        )
         return
     
     if status == "banned":
@@ -761,7 +767,8 @@ async def on_send_request(message: Message, bot: Bot) -> None:
         await message.answer(
             "✅ Заявка отправлена!\n\n"
             "Ожидайте подтверждения от администратора.\n"
-            "Вам придёт уведомление когда заявка будет одобрена."
+            "Вам придёт уведомление когда заявка будет одобрена.",
+            reply_markup=ReplyKeyboardRemove(remove_keyboard=True),
         )
     except Exception as e:
         set_user_status(user_id, None)  # Откатываем статус
@@ -800,6 +807,7 @@ async def on_add_user(message: Message, bot: Bot) -> None:
                 "Теперь вы можете пользоваться ботом.\n"
                 "Нажмите /start чтобы начать."
             ),
+            reply_markup=ReplyKeyboardRemove(remove_keyboard=True),
         )
     except Exception:
         pass
