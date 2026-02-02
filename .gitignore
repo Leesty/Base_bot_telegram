@@ -1,3 +1,7 @@
+# В Git только bot.py и requirements.txt — остальное игнорируем
+DEPLOY_GUIDE.txt
+README.md
+
 # Секреты
 .env
 

@@ -6,7 +6,7 @@ from datetime import datetime
 from typing import List, Set, Dict, Optional
 
 from aiogram import Bot, Dispatcher, F
-from aiogram.filters import CommandStart, Command
+from aiogram.filters import CommandStart, Command, StateFilter
 from aiogram.types import (
     Message,
     ReplyKeyboardMarkup,
@@ -60,6 +60,9 @@ USER_STATUS_FILE = "user_status.csv"
 # ID топика для заявок (создаётся автоматически или указать вручную)
 REQUESTS_TOPIC_ID = None  # Будет создан автоматически
 
+# ID топика «Отчёт» в чате админов
+REPORTS_TOPIC_ID = 156
+
 # Карта названий листов Excel -> внутренние ключи (для загрузки через админку)
 EXCEL_SHEET_MAP = {
     # Короткие названия
@@ -111,6 +114,10 @@ class AdminStates(StatesGroup):
     waiting_upload_choice = State()  # Ожидание выбора типа базы для загрузки
     waiting_file = State()  # Ожидание файла от админа
     waiting_delete_confirm = State()  # Ожидание подтверждения удаления базы
+
+
+class ReportStates(StatesGroup):
+    waiting_report = State()  # Сбор файлов отчёта
 
 
 # ============ ГЛОБАЛЬНЫЕ ПЕРЕМЕННЫЕ ============
@@ -534,7 +541,19 @@ def get_main_keyboard() -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(
         keyboard=[
             [KeyboardButton(text="📦 Получить списки контактов")],
+            [KeyboardButton(text="📋 Сдать отчёт")],
             [KeyboardButton(text="💬 Написать в поддержку")],
+        ],
+        resize_keyboard=True,
+    )
+
+
+def get_report_keyboard() -> ReplyKeyboardMarkup:
+    """Клавиатура при сдаче отчёта."""
+    return ReplyKeyboardMarkup(
+        keyboard=[
+            [KeyboardButton(text="📤 Отправить отчёт")],
+            [KeyboardButton(text="❌ Отмена")],
         ],
         resize_keyboard=True,
     )
@@ -1144,6 +1163,12 @@ async def on_user_base_choice(message: Message, state: FSMContext, bot: Bot) -> 
         if chunk:
             await message.answer(chunk)
     
+    # Подсказка и переход в главное меню
+    await message.answer(
+        "Когда выполните работу, нажмите на кнопку «Сдать отчёт».",
+        reply_markup=get_main_keyboard(),
+    )
+    
     # Проверяем, осталось ли меньше 5% свободных контактов
     try:
         csv_path = info["csv"]
@@ -1410,6 +1435,149 @@ async def on_support_info(message: Message) -> None:
         "💬 Чтобы связаться с поддержкой, просто напиши любое сообщение в этот чат.\n\n"
         "Твоё сообщение будет отправлено менеджеру, и он ответит тебе здесь."
     )
+
+
+# ============ ОТЧЁТЫ ============
+
+async def on_report_start(message: Message, state: FSMContext) -> None:
+    """Пользователь нажал 'Сдать отчёт' — начинаем сбор файлов."""
+    user = message.from_user
+    if not user or not is_user_approved(user.id):
+        await message.answer("❌ У вас нет доступа к этой функции.")
+        return
+    
+    await state.set_state(ReportStates.waiting_report)
+    await state.update_data(report_items=[])
+    await message.answer(
+        "Пришлите скриншоты, файлы или текстовые сообщения для отчёта.\n\n"
+        "Когда всё загрузите, нажмите «Отправить отчёт».",
+        reply_markup=get_report_keyboard(),
+    )
+
+
+async def on_report_file(
+    message: Message, state: FSMContext, bot: Bot,
+) -> None:
+    """Приём фото/документов для отчёта."""
+    user = message.from_user
+    if not user:
+        return
+    
+    data = await state.get_data()
+    items = data.get("report_items", [])
+    
+    file_id = None
+    file_type = None
+    if message.photo:
+        file_id = message.photo[-1].file_id
+        file_type = "photo"
+    elif message.document:
+        file_id = message.document.file_id
+        file_type = "document"
+    elif message.video:
+        file_id = message.video.file_id
+        file_type = "video"
+    
+    if file_id and file_type:
+        items.append({"type": file_type, "file_id": file_id})
+        await state.update_data(report_items=items)
+        await message.answer(f"✅ Добавлено. Нажмите «Отправить отчёт», когда всё загрузите.")
+
+
+async def on_report_submit(
+    message: Message, state: FSMContext, bot: Bot,
+) -> None:
+    """Пользователь нажал 'Отправить отчёт'."""
+    user = message.from_user
+    if not user:
+        return
+    
+    data = await state.get_data()
+    items = data.get("report_items", [])
+    
+    if not items:
+        await message.answer("Сначала пришлите скриншоты, файлы или текст для отчёта.")
+        return
+    
+    user_id = user.id
+    topics = load_support_topics()
+    topic_id = topics.get(user_id)
+    
+    # Файлы идут в обычный чат поддержки пользователя; если его нет — в топик «Отчёты»
+    target_topic = topic_id if topic_id else REPORTS_TOPIC_ID
+    
+    try:
+        # Уведомление в топик «Отчёты»
+        await bot.send_message(
+            chat_id=SUPPORT_GROUP_ID,
+            message_thread_id=REPORTS_TOPIC_ID,
+            text=(
+                f"📋 Новый отчёт!\n\n"
+                f"👤 {user.full_name}\n"
+                f"🆔 ID: {user_id}\n"
+                f"📱 @{user.username or 'нет'}\n\n"
+                f"См. файлы в чате пользователя ⬇️" if topic_id else "Файлы ниже ⬇️"
+            ),
+        )
+        
+        # Файлы — в обычный чат поддержки пользователя
+        await bot.send_message(
+            chat_id=SUPPORT_GROUP_ID,
+            message_thread_id=target_topic,
+            text=f"📋 Отчёт от {user.full_name} (@{user.username or 'нет'}):",
+        )
+        for item in items:
+            ft = item["type"]
+            if ft == "text":
+                await bot.send_message(
+                    chat_id=SUPPORT_GROUP_ID,
+                    message_thread_id=target_topic,
+                    text=f"💬 {item['content']}",
+                )
+            elif ft == "photo":
+                await bot.send_photo(
+                    chat_id=SUPPORT_GROUP_ID,
+                    message_thread_id=target_topic,
+                    photo=item["file_id"],
+                )
+            elif ft == "document":
+                await bot.send_document(
+                    chat_id=SUPPORT_GROUP_ID,
+                    message_thread_id=target_topic,
+                    document=item["file_id"],
+                )
+            elif ft == "video":
+                await bot.send_video(
+                    chat_id=SUPPORT_GROUP_ID,
+                    message_thread_id=target_topic,
+                    video=item["file_id"],
+                )
+        
+        await state.clear()
+        await message.answer(
+            "✅ Отчёт отправлен!",
+            reply_markup=get_main_keyboard(),
+        )
+    except Exception as e:
+        await message.answer(f"❌ Ошибка при отправке: {e}")
+
+
+async def on_report_cancel(message: Message, state: FSMContext) -> None:
+    """Отмена сдачи отчёта."""
+    await state.clear()
+    await message.answer("Отмена.", reply_markup=get_main_keyboard())
+
+
+async def on_report_other(message: Message, state: FSMContext) -> None:
+    """Текстовые сообщения в режиме отчёта — добавляем в отчёт."""
+    if not message.text or not message.text.strip():
+        return
+    
+    data = await state.get_data()
+    items = data.get("report_items", [])
+    items.append({"type": "text", "content": message.text.strip()})
+    await state.update_data(report_items=items)
+    await message.answer("✅ Добавлено. Нажмите «Отправить отчёт», когда всё загрузите.")
 
 
 async def on_user_message_to_support(message: Message, bot: Bot) -> None:
@@ -1833,8 +2001,30 @@ async def main() -> None:
 
     # Пользователь: навигация
     dp.message.register(on_get_base, F.text == "📦 Получить списки контактов")
+    dp.message.register(on_report_start, F.text == "📋 Сдать отчёт")
     dp.message.register(on_support_info, F.text == "💬 Написать в поддержку")
     dp.message.register(on_back, F.text == "⬅️ Назад")
+
+    # Отчёты: сбор и отправка (ДО on_user_message_to_support!)
+    dp.message.register(
+        on_report_submit,
+        StateFilter(ReportStates.waiting_report),
+        F.text == "📤 Отправить отчёт",
+    )
+    dp.message.register(
+        on_report_cancel,
+        StateFilter(ReportStates.waiting_report),
+        F.text == "❌ Отмена",
+    )
+    dp.message.register(
+        on_report_file,
+        StateFilter(ReportStates.waiting_report),
+        F.photo | F.document | F.video,
+    )
+    dp.message.register(
+        on_report_other,
+        StateFilter(ReportStates.waiting_report),
+    )
 
     # Пользователь: выбор типа базы
     for btn_text in USER_BUTTON_MAP:
