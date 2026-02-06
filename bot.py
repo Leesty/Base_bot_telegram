@@ -2200,6 +2200,81 @@ async def on_report_start(message: Message, state: FSMContext) -> None:
     )
 
 
+async def _maybe_show_category_for_item(
+    state: FSMContext,
+    message: Message,
+    bot: Bot,
+    item: dict,
+    *,
+    user_id: int,
+    username: str,
+    user_name: str,
+) -> None:
+    """Если в элементе есть контакт — сразу показать выбор категории."""
+    source_text = item.get("content", "") or item.get("caption", "") or ""
+    if not source_text:
+        await message.answer(
+            "✅ Добавлено. Можете загрузить следующий лид или нажать «Отправить отчёт».",
+            reply_markup=get_report_keyboard(),
+        )
+        return
+
+    contacts = extract_contacts_from_text(source_text)
+    seen = {}
+    unique = []
+    for c in contacts:
+        norm = normalize_contact(c)
+        if norm and norm not in seen:
+            seen[norm] = c
+            unique.append(c)
+
+    pending = []
+    dup_msg = []
+    for contact in unique:
+        if check_lead_duplicate(contact):
+            dup_msg.append(contact)
+        else:
+            pending.append(contact)
+
+    if dup_msg and not pending:
+        await message.answer(
+            f"⚠️ Эти контакты уже в базе: {', '.join(dup_msg)}\n\n"
+            "Можете загрузить следующий лид или нажать «Отправить отчёт».",
+            reply_markup=get_report_keyboard(),
+        )
+        return
+
+    if pending:
+        topics = load_support_topics()
+        topic_id = topics.get(user_id)
+        target_topic = topic_id if topic_id else REPORTS_TOPIC_ID
+
+        await state.update_data(
+            report_pending_contacts=pending,
+            report_idx=0,
+            report_user_id=user_id,
+            report_username=username,
+            report_user_name=user_name,
+            report_topic_id=topic_id,
+            report_target_topic=target_topic,
+            report_message_id=None,
+        )
+        await state.set_state(ReportStates.waiting_category)
+        contact = pending[0]
+        total = len(pending)
+        dup_note = f"⚠️ Уже в базе: {', '.join(dup_msg)}\n\n" if dup_msg else ""
+        await message.answer(
+            f"{dup_note}📋 Контакт 1 из {total}: {contact}\n\n"
+            "Выберите категорию для добавления лида:",
+            reply_markup=get_report_category_inline_keyboard(0),
+        )
+    elif not dup_msg:
+        await message.answer(
+            "✅ Добавлено. Можете загрузить следующий лид или нажать «Отправить отчёт».",
+            reply_markup=get_report_keyboard(),
+        )
+
+
 async def on_report_file(
     message: Message, state: FSMContext, bot: Bot,
 ) -> None:
@@ -2227,7 +2302,13 @@ async def on_report_file(
     if file_id and file_type:
         items.append({"type": file_type, "file_id": file_id, "caption": caption})
         await state.update_data(report_items=items)
-        await message.answer(f"✅ Добавлено. Нажмите «Отправить отчёт», когда всё загрузите.")
+        # Сразу показываем выбор категории, если есть контакт
+        await _maybe_show_category_for_item(
+            state, message, bot, items[-1],
+            user_id=user.id,
+            username=user.username or "",
+            user_name=user.full_name or "",
+        )
 
 
 async def on_report_submit(
@@ -2321,109 +2402,12 @@ async def on_report_submit(
                     caption=cap,
                 )
         
-        # ============ ОБРАБОТКА ЛИДОВ ============
-        ensure_leads_csv_exists()
-        # Извлекаем контакты
-        all_contacts_with_source = []
-        for item in items:
-            source_text = item.get("content", "") or item.get("caption", "") or ""
-            if source_text:
-                for c in extract_contacts_from_text(source_text):
-                    all_contacts_with_source.append((c, source_text))
-        
-        seen = {}
-        unique_contacts = []
-        for contact, source in all_contacts_with_source:
-            norm = normalize_contact(contact)
-            if norm and norm not in seen:
-                seen[norm] = (contact, source)
-                unique_contacts.append((contact, source))
-        
-        # Разделяем: дубликаты — уведомляем, остальные — выбор категории кнопками
-        duplicates_found = []
-        pending_contacts = []
-        for contact, source_text in unique_contacts:
-            duplicate = check_lead_duplicate(contact)
-            if duplicate:
-                dup_type, dup_user_id, dup_username = duplicate
-                duplicates_found.append({
-                    "contact": contact,
-                    "type": LEAD_TYPES[dup_type]["name"],
-                    "original_user_id": dup_user_id,
-                    "original_username": dup_username
-                })
-            else:
-                pending_contacts.append(contact)
-        
-        # Уведомления о дубликатах
-        if duplicates_found:
-            # Формируем ссылки
-            user_link = f'<a href="tg://user?id={user_id}">{user.full_name}</a>'
-            
-            # Ссылка на топик и сообщение с отчетом (если есть топик)
-            report_link = ""
-            if topic_id:
-                chat_id_short = str(SUPPORT_GROUP_ID).replace("-100", "")
-                report_url = f"https://t.me/c/{chat_id_short}/{target_topic}/{report_message_id}"
-                report_link = f'\n\n📨 <a href="{report_url}">Открыть отчёт со скринами</a>'
-            
-            # Уведомление пользователю о дубликатах
-            dup_list = ", ".join(dup["contact"] for dup in duplicates_found)
-            await bot.send_message(
-                chat_id=user_id,
-                text=(
-                    f"⚠️ Дубликат лида!\n\n"
-                    f"Эти контакты уже есть в базе: {dup_list}\n\n"
-                    f"Они не будут добавлены повторно."
-                ),
-            )
-            
-            for dup in duplicates_found:
-                await bot.send_message(
-                    chat_id=SUPPORT_GROUP_ID,
-                    message_thread_id=LEADS_TOPIC_ID,
-                    text=(
-                        f"⚠️ Дубликат лида!\n\n"
-                        f"📋 Лид: {dup['contact']}\n"
-                        f"📦 Тип: {dup['type']}\n\n"
-                        f"Попытался добавить:\n"
-                        f"👤 {user_link}\n"
-                        f"🆔 ID: {user_id}\n"
-                        f"📱 @{user.username or 'нет'}"
-                        f"{report_link}\n\n"
-                        f"Уже в базе от:\n"
-                        f"🆔 ID: {dup['original_user_id']}\n"
-                        f"📱 @{dup['original_username']}"
-                    ),
-                    parse_mode="HTML",
-                )
-        
-        # Если есть контакты для добавления — показываем выбор категории кнопками
-        if pending_contacts:
-            await state.update_data(
-                report_pending_contacts=pending_contacts,
-                report_idx=0,
-                report_user_id=user_id,
-                report_username=user.username or "",
-                report_user_name=user.full_name or "",
-                report_topic_id=topic_id,
-                report_target_topic=target_topic,
-                report_message_id=report_message_id,
-            )
-            await state.set_state(ReportStates.waiting_category)
-            contact = pending_contacts[0]
-            total = len(pending_contacts)
-            await message.answer(
-                f"📋 Контакт 1 из {total}: {contact}\n\n"
-                "Выберите категорию для добавления лида:",
-                reply_markup=get_report_category_inline_keyboard(0),
-            )
-        else:
-            await state.clear()
-            await message.answer(
-                "✅ Отчёт отправлен!",
-                reply_markup=get_main_keyboard(),
-            )
+        # Лиды уже добавлены при выборе категории после каждого лида
+        await state.clear()
+        await message.answer(
+            "✅ Отчёт отправлен!",
+            reply_markup=get_main_keyboard(),
+        )
     except Exception as e:
         await message.answer(f"❌ Ошибка при отправке: {e}")
 
@@ -2477,7 +2461,7 @@ async def on_report_category_callback(callback: CallbackQuery, state: FSMContext
                 status = f"✅ Добавлено в {LEAD_TYPES[category]['name']}"
                 user_link = f'<a href="tg://user?id={user_id}">{user_name}</a>'
                 report_link = ""
-                if topic_id:
+                if topic_id and report_message_id:
                     chat_id_short = str(SUPPORT_GROUP_ID).replace("-100", "")
                     report_url = f"https://t.me/c/{chat_id_short}/{target_topic}/{report_message_id}"
                     report_link = f'\n\n📨 <a href="{report_url}">Открыть отчёт</a>'
@@ -2520,11 +2504,21 @@ async def on_report_category_callback(callback: CallbackQuery, state: FSMContext
             reply_markup=get_report_category_inline_keyboard(next_idx),
         )
     else:
-        await state.clear()
-        await callback.message.answer(
-            "✅ Отчёт завершён!",
-            reply_markup=get_main_keyboard(),
+        # Все контакты из этого лида обработаны — возвращаемся к сбору
+        await state.set_state(ReportStates.waiting_report)
+        await state.update_data(
+            report_pending_contacts=[],
+            report_idx=0,
         )
+        await callback.message.answer(
+            "✅ Добавлено. Можете загрузить следующий лид или нажать «Отправить отчёт».",
+            reply_markup=get_report_keyboard(),
+        )
+
+
+async def on_report_waiting_category_remind(message: Message, state: FSMContext) -> None:
+    """В режиме выбора категории — напоминание сначала выбрать категорию."""
+    await message.answer("👆 Сначала выберите категорию для текущего лида выше, затем можно загрузить следующий.")
 
 
 async def on_report_cancel(message: Message, state: FSMContext) -> None:
@@ -2546,17 +2540,27 @@ def _extract_text_with_urls(message: Message) -> str:
     return text
 
 
-async def on_report_other(message: Message, state: FSMContext) -> None:
+async def on_report_other(message: Message, state: FSMContext, bot: Bot) -> None:
     """Текстовые сообщения в режиме отчёта — добавляем в отчёт."""
     content = _extract_text_with_urls(message)
     if not content:
+        return
+    
+    user = message.from_user
+    if not user:
         return
     
     data = await state.get_data()
     items = data.get("report_items", [])
     items.append({"type": "text", "content": content})
     await state.update_data(report_items=items)
-    await message.answer("✅ Добавлено. Нажмите «Отправить отчёт», когда всё загрузите.")
+    # Сразу показываем выбор категории, если есть контакт
+    await _maybe_show_category_for_item(
+        state, message, bot, items[-1],
+        user_id=user.id,
+        username=user.username or "",
+        user_name=user.full_name or "",
+    )
 
 
 async def on_user_message_to_support(message: Message, bot: Bot) -> None:
@@ -2611,6 +2615,30 @@ async def on_user_message_to_support(message: Message, bot: Bot) -> None:
             await message.answer(f"❌ Не удалось создать чат с поддержкой: {e}")
             return
 
+    # Сначала пересылаем сообщение в топик, чтобы получить message_id для ссылки
+    forwarded_msg_id = None
+    try:
+        forwarded = await message.forward(
+            chat_id=SUPPORT_GROUP_ID,
+            message_thread_id=topic_id,
+        )
+        forwarded_msg_id = forwarded.message_id
+        await message.answer("✅ Сообщение отправлено в поддержку.")
+    except Exception as e:
+        if "thread not found" in str(e).lower() or "message thread not found" in str(e).lower():
+            try:
+                topic_id = await create_new_topic()
+                forwarded = await message.forward(
+                    chat_id=SUPPORT_GROUP_ID,
+                    message_thread_id=topic_id,
+                )
+                forwarded_msg_id = forwarded.message_id
+                await message.answer("✅ Сообщение отправлено в поддержку.")
+            except Exception as e2:
+                await message.answer(f"❌ Не удалось отправить сообщение: {e2}")
+        else:
+            await message.answer(f"❌ Не удалось отправить сообщение: {e}")
+    
     # Любые ссылки в сообщении — добавляем как лиды (даже без режима отчёта)
     content = _extract_text_with_urls(message)
     if content:
@@ -2619,6 +2647,10 @@ async def on_user_message_to_support(message: Message, bot: Bot) -> None:
             ensure_leads_csv_exists()
             user_id = user.id
             username = user.username or ""
+            msg_link = ""
+            if forwarded_msg_id:
+                chat_short = str(SUPPORT_GROUP_ID).replace("-100", "")
+                msg_link = f'\n\n📨 <a href="https://t.me/c/{chat_short}/{topic_id}/{forwarded_msg_id}">Открыть сообщение</a>'
             for contact in contacts:
                 if check_lead_duplicate(contact):
                     continue
@@ -2638,32 +2670,12 @@ async def on_user_message_to_support(message: Message, bot: Bot) -> None:
                                 f"📋 Контакт: {contact}\n"
                                 f"📦 Категория: {LEAD_TYPES[contact_type]['name']}\n"
                                 f"👤 От: {user.full_name} (@{username or 'нет'})"
+                                f"{msg_link}"
                             ),
+                            parse_mode="HTML",
                         )
                 except Exception as e:
                     print(f"Ошибка добавления лида {contact}: {e}")
-    
-    try:
-        # Пересылаем сообщение в топик
-        await message.forward(
-            chat_id=SUPPORT_GROUP_ID,
-            message_thread_id=topic_id,
-        )
-        await message.answer("✅ Сообщение отправлено в поддержку.")
-    except Exception as e:
-        # Если топик удалён — пересоздаём
-        if "thread not found" in str(e).lower() or "message thread not found" in str(e).lower():
-            try:
-                topic_id = await create_new_topic()
-                await message.forward(
-                    chat_id=SUPPORT_GROUP_ID,
-                    message_thread_id=topic_id,
-                )
-                await message.answer("✅ Сообщение отправлено в поддержку.")
-            except Exception as e2:
-                await message.answer(f"❌ Не удалось отправить сообщение: {e2}")
-        else:
-            await message.answer(f"❌ Не удалось отправить сообщение: {e}")
 
 
 async def on_support_admin_reply(message: Message, bot: Bot) -> None:
@@ -3082,6 +3094,11 @@ async def main() -> None:
     dp.message.register(
         on_report_other,
         StateFilter(ReportStates.waiting_report),
+    )
+    dp.message.register(
+        on_report_waiting_category_remind,
+        StateFilter(ReportStates.waiting_category),
+        F.photo | F.document | F.video | F.text,
     )
 
     # Пользователь: выбор типа базы
