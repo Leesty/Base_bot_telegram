@@ -476,12 +476,12 @@ def extract_contacts_from_text(text: str) -> List[str]:
         if path_clean:
             contacts.append(f"avito.ru/{path_clean}")
     
-    # instagram.com/username (убираем query-параметры ?igsh=...)
-    ig_links = re.findall(r'(?:https?://)?(?:www\.)?instagram\.com/([a-zA-Z0-9_.\-]+)', text, re.IGNORECASE)
+    # instagram.com/username (включая l.instagram.com, ?igsh=...)
+    ig_links = re.findall(r'(?:https?://)?(?:[a-zA-Z0-9\-]+\.)?instagram\.com/([a-zA-Z0-9_.\-]+)', text, re.IGNORECASE)
     for u in ig_links:
         clean_u = u.split("?")[0].strip().rstrip("/")
         if clean_u:
-            contacts.append(clean_u)
+            contacts.append(f"instagram.com/{clean_u}")
     
     # Юла / mail.ru (trk.mail.ru, la.youla.ru, m.youla.ru, youla.ru и др.) — сохраняем полную ссылку
     yula_links = re.findall(
@@ -540,6 +540,10 @@ def determine_contact_type(contact: str, user_id: int) -> Optional[str]:
     # Ссылки на Кворк (kwork.ru)
     if contact and "kwork.ru" in contact.lower():
         return "kwork"
+    
+    # Ссылки на Instagram (instagram.com, l.instagram.com и т.д.)
+    if contact and "instagram.com" in contact.lower():
+        return "instagram"
     
     # Ссылки на VK — если не найдены в базе выдачи, вернём None (будет "самостоятельный")
     # Проверяем и в базе: возможно выдан пользователю
