@@ -2220,6 +2220,10 @@ async def _maybe_show_category_for_item(
         return
 
     contacts = extract_contacts_from_text(source_text)
+    # Если контакты не распознаны — считаем весь текст одним контактом (test, ник и т.д.)
+    if not contacts and source_text.strip():
+        contacts = [source_text.strip()]
+
     seen = {}
     unique = []
     for c in contacts:
@@ -2245,10 +2249,29 @@ async def _maybe_show_category_for_item(
         return
 
     if pending:
+        # Если в тексте явно указано "тг" или "tg" — сразу добавляем как Telegram
+        src_lower = source_text.lower()
+        tg_hint = (" тг" in src_lower or "тг " in src_lower or src_lower.strip() == "тг"
+                   or " tg" in src_lower or "tg " in src_lower)
+
+        if tg_hint and len(pending) == 1:
+            contact = pending[0]
+            in_base = determine_contact_type(contact, user_id) == "telegram"
+            source = "база" if in_base else "самостоятельный телеграм"
+            try:
+                if add_lead(contact, "telegram", user_id, username, source=source):
+                    await message.answer(
+                        f"✅ Добавлено в Telegram: {contact}\n\n"
+                        "Можете загрузить следующий лид или нажать «Отправить отчёт».",
+                        reply_markup=get_report_keyboard(),
+                    )
+                    return
+            except Exception:
+                pass
+
         topics = load_support_topics()
         topic_id = topics.get(user_id)
         target_topic = topic_id if topic_id else REPORTS_TOPIC_ID
-
         await state.update_data(
             report_pending_contacts=pending,
             report_idx=0,
@@ -2401,8 +2424,66 @@ async def on_report_submit(
                     video=item["file_id"],
                     caption=cap,
                 )
-        
-        # Лиды уже добавлены при выборе категории после каждого лида
+
+        # Извлекаем контакты из отчёта и добавляем в лиды (как в чате поддержки)
+        ensure_leads_csv_exists()
+        all_contacts_with_source = []
+        for item in items:
+            source_text = item.get("content", "") or item.get("caption", "") or ""
+            if source_text:
+                contacts = extract_contacts_from_text(source_text)
+                if not contacts:
+                    contacts = [source_text.strip()]
+                for c in contacts:
+                    if c.strip():
+                        all_contacts_with_source.append((c.strip(), source_text))
+
+        seen = {}
+        unique_contacts = []
+        for contact, _ in all_contacts_with_source:
+            norm = normalize_contact(contact)
+            if norm and norm not in seen:
+                seen[norm] = contact
+                unique_contacts.append(contact)
+
+        content_lower = " ".join(
+            (item.get("content", "") or item.get("caption", "") or "").lower()
+            for item in items
+        )
+        tg_hint = " тг" in content_lower or "тг " in content_lower or " tg" in content_lower or "tg " in content_lower
+        username_str = user.username or ""
+
+        for contact in unique_contacts:
+            if check_lead_duplicate(contact):
+                continue
+            contact_type = determine_contact_type(contact, user_id)
+            if not contact_type or contact_type not in LEAD_TYPES:
+                contact_type = "telegram" if tg_hint else "self"
+            in_base = bool(contact_type) and determine_contact_type(contact, user_id) == contact_type
+            src_name = LEAD_TYPES[contact_type]["name"].lower()
+            source = "база" if in_base else ("самостоятельный" if contact_type == "self" else f"самостоятельный {src_name}")
+            try:
+                if add_lead(contact, contact_type, user_id, username_str, source=source):
+                    user_link = f'<a href="tg://user?id={user_id}">{user.full_name}</a>'
+                    chat_id_short = str(SUPPORT_GROUP_ID).replace("-100", "")
+                    report_link = f'\n\n📨 <a href="https://t.me/c/{chat_id_short}/{target_topic}/{report_message_id}">Открыть отчёт</a>' if topic_id else ""
+                    await bot.send_message(
+                        chat_id=SUPPORT_GROUP_ID,
+                        message_thread_id=LEADS_TOPIC_ID,
+                        text=(
+                            f"✅ Лид из отчёта\n\n"
+                            f"📋 Контакт: {contact}\n"
+                            f"📦 Категория: {LEAD_TYPES[contact_type]['name']}\n"
+                            f"👤 От: {user_link}\n"
+                            f"🆔 ID: {user_id}\n"
+                            f"📱 @{username_str or 'нет'}"
+                            f"{report_link}"
+                        ),
+                        parse_mode="HTML",
+                    )
+            except Exception as e:
+                print(f"Ошибка добавления лида {contact}: {e}")
+
         await state.clear()
         await message.answer(
             "✅ Отчёт отправлен!",
@@ -2651,12 +2732,15 @@ async def on_user_message_to_support(message: Message, bot: Bot) -> None:
             if forwarded_msg_id:
                 chat_short = str(SUPPORT_GROUP_ID).replace("-100", "")
                 msg_link = f'\n\n📨 <a href="https://t.me/c/{chat_short}/{topic_id}/{forwarded_msg_id}">Открыть сообщение</a>'
+            content_lower = content.lower()
+            tg_hint = " тг" in content_lower or "тг " in content_lower or " tg" in content_lower or "tg " in content_lower
+
             for contact in contacts:
                 if check_lead_duplicate(contact):
                     continue
                 contact_type = determine_contact_type(contact, user_id)
                 if not contact_type or contact_type not in LEAD_TYPES:
-                    contact_type = "self"
+                    contact_type = "telegram" if tg_hint else "self"
                 in_base = bool(contact_type) and determine_contact_type(contact, user_id) == contact_type
                 src_name = LEAD_TYPES[contact_type]['name'].lower()
                 source = "база" if in_base else ("самостоятельный" if contact_type == "self" else f"самостоятельный {src_name}")
