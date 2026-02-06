@@ -140,6 +140,7 @@ class AdminStates(StatesGroup):
 
 class ReportStates(StatesGroup):
     waiting_report = State()  # Сбор файлов отчёта
+    waiting_category = State()  # Выбор категории для лида из отчёта
 
 
 class ManualLeadStates(StatesGroup):
@@ -384,6 +385,8 @@ def ensure_csv_exists() -> None:
             print(f"Создан пустой файл: {csv_path}")
 
 
+LEADS_CSV_HEADER = ["Value", "User_ID", "Username", "Date", "Источник"]
+
 def ensure_leads_csv_exists() -> None:
     """Проверяет наличие CSV-файлов для лидов. Создаёт пустые, если нет."""
     for key, info in LEAD_TYPES.items():
@@ -391,7 +394,7 @@ def ensure_leads_csv_exists() -> None:
         if not os.path.exists(csv_path):
             with open(csv_path, "w", encoding="utf-8", newline="") as f:
                 writer = csv.writer(f)
-                writer.writerow(["Value", "User_ID", "Username", "Date"])
+                writer.writerow(LEADS_CSV_HEADER)
             print(f"Создан пустой файл лидов: {csv_path}")
 
 
@@ -609,8 +612,8 @@ def check_lead_duplicate(contact: str) -> Optional[tuple]:
     return None
 
 
-def add_lead(contact: str, lead_type: str, user_id: int, username: str) -> bool:
-    """Добавляет лид в базу. Возвращает True если успешно."""
+def add_lead(contact: str, lead_type: str, user_id: int, username: str, source: str = "") -> bool:
+    """Добавляет лид в базу. source: '' | 'база' | 'самостоятельный' (для контактов не из базы выдачи)."""
     info = LEAD_TYPES.get(lead_type)
     if not info:
         return False
@@ -620,7 +623,7 @@ def add_lead(contact: str, lead_type: str, user_id: int, username: str) -> bool:
     
     # Добавляем новую запись
     now = datetime.now().strftime("%Y.%m.%d %H:%M:%S")
-    new_row = [contact, user_id, username or "нет", now]
+    new_row = [contact, user_id, username or "нет", now, source or ""]
     rows.append(new_row)
     
     _write_csv(csv_path, rows)
@@ -866,7 +869,7 @@ def _create_leads_excel() -> tuple[io.BytesIO, str]:
             for row in rows:
                 ws.append(row)
         else:
-            ws.append(["Value", "User_ID", "Username", "Date"])
+            ws.append(LEADS_CSV_HEADER)
 
     buffer = io.BytesIO()
     wb.save(buffer)
@@ -1042,6 +1045,37 @@ def get_lead_category_inline_keyboard() -> InlineKeyboardMarkup:
         [InlineKeyboardButton(text="🟣 Кворк", callback_data="lead_cat_kwork")],
         [InlineKeyboardButton(text="🔵 Самостоятельные лиды", callback_data="lead_cat_self")],
         [InlineKeyboardButton(text="⬅️ Отмена", callback_data="lead_cat_cancel")],
+    ])
+
+
+def get_report_category_inline_keyboard(idx: int) -> InlineKeyboardMarkup:
+    """Inline-клавиатура выбора категории для лида в отчёте."""
+    prefix = f"report_cat_{idx}_"
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [
+            InlineKeyboardButton(text="📱 Telegram", callback_data=prefix + "telegram"),
+            InlineKeyboardButton(text="💬 WhatsApp", callback_data=prefix + "whatsapp"),
+        ],
+        [
+            InlineKeyboardButton(text="📨 Max", callback_data=prefix + "max"),
+            InlineKeyboardButton(text="📞 Viber", callback_data=prefix + "viber"),
+        ],
+        [
+            InlineKeyboardButton(text="📷 Нельзяграм", callback_data=prefix + "instagram"),
+            InlineKeyboardButton(text="👥 ВКонтакте", callback_data=prefix + "vk"),
+        ],
+        [
+            InlineKeyboardButton(text="🟠 Одноклассники", callback_data=prefix + "ok"),
+            InlineKeyboardButton(text="📧 Почта", callback_data=prefix + "email"),
+        ],
+        [
+            InlineKeyboardButton(text="🟢 Авито", callback_data=prefix + "avito"),
+            InlineKeyboardButton(text="🟡 Юла", callback_data=prefix + "yula"),
+        ],
+        [InlineKeyboardButton(text="🟣 Кворк", callback_data=prefix + "kwork")],
+        [InlineKeyboardButton(text="🔵 Самостоятельные", callback_data=prefix + "self")],
+        [InlineKeyboardButton(text="⏭ Пропустить", callback_data=prefix + "skip")],
+        [InlineKeyboardButton(text="⬅️ Отмена отчёта", callback_data=prefix + "cancel")],
     ])
 
 
@@ -1640,8 +1674,10 @@ async def on_add_lead_category_callback(callback: CallbackQuery, state: FSMConte
         await state.clear()
         return
     
-    # Добавляем лид
-    success = add_lead(contact, lead_type, user.id, user.username or "admin")
+    # Добавляем лид: проверяем, из базы или самостоятельный
+    in_base = determine_contact_type(contact, user.id) == lead_type
+    source = "база" if in_base else f"самостоятельный {LEAD_TYPES[lead_type]['name'].lower()}"
+    success = add_lead(contact, lead_type, user.id, user.username or "admin", source=source)
     
     if success:
         try:
@@ -2286,22 +2322,15 @@ async def on_report_submit(
                 )
         
         # ============ ОБРАБОТКА ЛИДОВ ============
-        ensure_leads_csv_exists()  # Гарантируем наличие файлов лидов
-        # Извлекаем контакты с источником (contact, source_text)
-        all_contacts_with_source = []  # [(contact, source_text), ...]
+        ensure_leads_csv_exists()
+        # Извлекаем контакты
+        all_contacts_with_source = []
         for item in items:
-            source_text = ""
-            if item["type"] == "text":
-                source_text = item.get("content", "") or ""
-            elif item["type"] in ("photo", "document", "video"):
-                source_text = item.get("caption", "") or ""
-            
+            source_text = item.get("content", "") or item.get("caption", "") or ""
             if source_text:
-                contacts = extract_contacts_from_text(source_text)
-                for c in contacts:
+                for c in extract_contacts_from_text(source_text):
                     all_contacts_with_source.append((c, source_text))
         
-        # Убираем дубликаты контактов (оставляем первый источник)
         seen = {}
         unique_contacts = []
         for contact, source in all_contacts_with_source:
@@ -2310,12 +2339,10 @@ async def on_report_submit(
                 seen[norm] = (contact, source)
                 unique_contacts.append((contact, source))
         
-        # Обрабатываем каждый контакт
-        leads_added = []  # Список добавленных лидов с деталями
+        # Разделяем: дубликаты — уведомляем, остальные — выбор категории кнопками
         duplicates_found = []
-        
+        pending_contacts = []
         for contact, source_text in unique_contacts:
-            # Проверяем дубликат
             duplicate = check_lead_duplicate(contact)
             if duplicate:
                 dup_type, dup_user_id, dup_username = duplicate
@@ -2325,35 +2352,8 @@ async def on_report_submit(
                     "original_user_id": dup_user_id,
                     "original_username": dup_username
                 })
-                continue
-            
-            # Определяем тип контакта
-            # Ключевые слова: "сам"/"самостоятельно" -> Самостоятельные; "юла" -> Юла; "кворк" -> Кворк
-            if SELF_LEAD_KEYWORDS.search(source_text):
-                contact_type = "self"
-            elif YULA_LEAD_KEYWORDS.search(source_text):
-                contact_type = "yula"
-            elif KWORK_LEAD_KEYWORDS.search(source_text):
-                contact_type = "kwork"
             else:
-                contact_type = determine_contact_type(contact, user_id)
-            
-            # Любой лид, не найденный в базе выдачи — всегда в "Самостоятельные лиды"
-            if not contact_type or contact_type not in LEAD_TYPES:
-                contact_type = "self"
-            
-            # Добавляем лид (всегда добавляем, если не дубликат — в т.ч. как самостоятельный)
-            try:
-                success = add_lead(contact, contact_type, user_id, user.username or "")
-            except Exception as e:
-                print(f"Ошибка добавления лида {contact}: {e}")
-                success = False
-            if success:
-                leads_added.append({
-                    "contact": contact,
-                    "type": contact_type,
-                    "type_name": LEAD_TYPES[contact_type]["name"]
-                })
+                pending_contacts.append(contact)
         
         # Уведомления о дубликатах
         if duplicates_found:
@@ -2398,41 +2398,133 @@ async def on_report_submit(
                     parse_mode="HTML",
                 )
         
-        # Уведомление о добавленных лидах
-        if leads_added:
-            # Формируем ссылки
-            user_link = f'<a href="tg://user?id={user_id}">{user.full_name}</a>'
-            
-            # Ссылка на топик и сообщение с отчетом (если есть топик)
-            report_link = ""
-            if topic_id:
-                chat_id_short = str(SUPPORT_GROUP_ID).replace("-100", "")
-                report_url = f"https://t.me/c/{chat_id_short}/{target_topic}/{report_message_id}"
-                report_link = f'\n\n📨 <a href="{report_url}">Открыть отчёт со скринами</a>'
-            
-            for lead in leads_added:
+        # Если есть контакты для добавления — показываем выбор категории кнопками
+        if pending_contacts:
+            await state.update_data(
+                report_pending_contacts=pending_contacts,
+                report_idx=0,
+                report_user_id=user_id,
+                report_username=user.username or "",
+                report_user_name=user.full_name or "",
+                report_topic_id=topic_id,
+                report_target_topic=target_topic,
+                report_message_id=report_message_id,
+            )
+            await state.set_state(ReportStates.waiting_category)
+            contact = pending_contacts[0]
+            total = len(pending_contacts)
+            await message.answer(
+                f"📋 Контакт 1 из {total}: {contact}\n\n"
+                "Выберите категорию для добавления лида:",
+                reply_markup=get_report_category_inline_keyboard(0),
+            )
+        else:
+            await state.clear()
+            await message.answer(
+                "✅ Отчёт отправлен!",
+                reply_markup=get_main_keyboard(),
+            )
+    except Exception as e:
+        await message.answer(f"❌ Ошибка при отправке: {e}")
+
+
+async def on_report_category_callback(callback: CallbackQuery, state: FSMContext, bot: Bot) -> None:
+    """Пользователь выбрал категорию для лида из отчёта."""
+    data_text = callback.data
+    if not data_text or not data_text.startswith("report_cat_"):
+        await callback.answer()
+        return
+    
+    # report_cat_{idx}_{category}
+    parts = data_text.split("_")
+    if len(parts) < 4:
+        await callback.answer()
+        return
+    idx = int(parts[2])
+    category = "_".join(parts[3:])  # на случай "lead_cat_0_self"
+    
+    data = await state.get_data()
+    pending = data.get("report_pending_contacts", [])
+    if idx >= len(pending):
+        await callback.answer("Контакты уже обработаны.")
+        await state.clear()
+        return
+    
+    contact = pending[idx]
+    user_id = data.get("report_user_id")
+    username = data.get("report_username", "")
+    user_name = data.get("report_user_name", "")
+    topic_id = data.get("report_topic_id")
+    target_topic = data.get("report_target_topic")
+    report_message_id = data.get("report_message_id")
+    
+    await callback.answer()
+    
+    if category == "cancel":
+        await state.clear()
+        await callback.message.edit_text("❌ Отчёт отменён.")
+        await callback.message.answer("Отчёт отменён.", reply_markup=get_main_keyboard())
+        return
+    
+    if category == "skip":
+        status = "⏭ Пропущено"
+    elif category in LEAD_TYPES:
+        try:
+            # Проверяем: контакт из базы выдачи или самостоятельный
+            in_base = determine_contact_type(contact, user_id) == category
+            source = "база" if in_base else f"самостоятельный {LEAD_TYPES[category]['name'].lower()}"
+            if add_lead(contact, category, user_id, username, source=source):
+                status = f"✅ Добавлено в {LEAD_TYPES[category]['name']}"
+                user_link = f'<a href="tg://user?id={user_id}">{user_name}</a>'
+                report_link = ""
+                if topic_id:
+                    chat_id_short = str(SUPPORT_GROUP_ID).replace("-100", "")
+                    report_url = f"https://t.me/c/{chat_id_short}/{target_topic}/{report_message_id}"
+                    report_link = f'\n\n📨 <a href="{report_url}">Открыть отчёт</a>'
                 await bot.send_message(
                     chat_id=SUPPORT_GROUP_ID,
                     message_thread_id=LEADS_TOPIC_ID,
                     text=(
                         f"✅ Новый лид добавлен!\n\n"
-                        f"📋 Контакт: {lead['contact']}\n"
-                        f"📦 Категория: {lead['type_name']}\n\n"
+                        f"📋 Контакт: {contact}\n"
+                        f"📦 Категория: {LEAD_TYPES[category]['name']}\n\n"
                         f"👤 От: {user_link}\n"
                         f"🆔 ID: {user_id}\n"
-                        f"📱 @{user.username or 'нет'}"
+                        f"📱 @{username or 'нет'}"
                         f"{report_link}"
                     ),
                     parse_mode="HTML",
                 )
-        
+            else:
+                status = "❌ Ошибка добавления"
+        except Exception as e:
+            print(f"Ошибка добавления лида {contact}: {e}")
+            status = "❌ Ошибка"
+    else:
+        status = "⏭ Пропущено"
+    
+    try:
+        await callback.message.edit_text(f"{status}\n\n📋 Контакт: {contact}")
+    except Exception:
+        pass
+    
+    # Следующий контакт или завершение
+    next_idx = idx + 1
+    if next_idx < len(pending):
+        await state.update_data(report_idx=next_idx)
+        next_contact = pending[next_idx]
+        total = len(pending)
+        await callback.message.answer(
+            f"📋 Контакт {next_idx + 1} из {total}: {next_contact}\n\n"
+            "Выберите категорию для добавления лида:",
+            reply_markup=get_report_category_inline_keyboard(next_idx),
+        )
+    else:
         await state.clear()
-        await message.answer(
-            "✅ Отчёт отправлен!",
+        await callback.message.answer(
+            "✅ Отчёт завершён!",
             reply_markup=get_main_keyboard(),
         )
-    except Exception as e:
-        await message.answer(f"❌ Ошибка при отправке: {e}")
 
 
 async def on_report_cancel(message: Message, state: FSMContext) -> None:
@@ -2533,8 +2625,11 @@ async def on_user_message_to_support(message: Message, bot: Bot) -> None:
                 contact_type = determine_contact_type(contact, user_id)
                 if not contact_type or contact_type not in LEAD_TYPES:
                     contact_type = "self"
+                in_base = bool(contact_type) and determine_contact_type(contact, user_id) == contact_type
+                src_name = LEAD_TYPES[contact_type]['name'].lower()
+                source = "база" if in_base else ("самостоятельный" if contact_type == "self" else f"самостоятельный {src_name}")
                 try:
-                    if add_lead(contact, contact_type, user_id, username):
+                    if add_lead(contact, contact_type, user_id, username, source=source):
                         await bot.send_message(
                             chat_id=SUPPORT_GROUP_ID,
                             message_thread_id=LEADS_TOPIC_ID,
@@ -2861,6 +2956,11 @@ async def main() -> None:
         StateFilter(ManualLeadStates.waiting_category),
         F.data.startswith("lead_cat_"),
     )
+    dp.callback_query.register(
+        on_report_category_callback,
+        StateFilter(ReportStates.waiting_category),
+        F.data.startswith("report_cat_"),
+    )
     dp.message.register(
         on_add_lead_contact,
         ManualLeadStates.waiting_contact,
@@ -2967,6 +3067,11 @@ async def main() -> None:
     dp.message.register(
         on_report_cancel,
         StateFilter(ReportStates.waiting_report),
+        F.text == "❌ Отмена",
+    )
+    dp.message.register(
+        on_report_cancel,
+        StateFilter(ReportStates.waiting_category),
         F.text == "❌ Отмена",
     )
     dp.message.register(
