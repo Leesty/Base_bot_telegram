@@ -2,7 +2,7 @@ import asyncio
 import csv
 import io
 import os
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import List, Set, Dict, Optional
 from zoneinfo import ZoneInfo
 
@@ -155,6 +155,10 @@ class ManualLeadStates(StatesGroup):
 
 class DeleteLeadStates(StatesGroup):
     waiting_contact = State()  # Ожидание контакта для удаления
+
+
+class SupportStates(StatesGroup):
+    active = State()  # Пользователь нажал «Написать в поддержку» и может отправлять сообщения
 
 
 # ============ ГЛОБАЛЬНЫЕ ПЕРЕМЕННЫЕ ============
@@ -752,7 +756,7 @@ def _assign_records_csv(
 ) -> List[str]:
     """Берёт свободные записи, помечает как выданные."""
     taken: List[str] = []
-    now = datetime.utcnow().strftime("%Y.%m.%d %H:%M:%S")
+    now = datetime.now(timezone.utc).strftime("%Y.%m.%d %H:%M:%S")
 
     for row in rows[1:]:
         if len(taken) >= count:
@@ -860,7 +864,7 @@ def _create_txt_file(values: List[str], prefix: str) -> tuple[io.BytesIO, str]:
     """Создаёт txt-файл в памяти."""
     content = "\n".join(values)
     buffer = io.BytesIO(content.encode("utf-8"))
-    filename = f"{prefix}_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}.txt"
+    filename = f"{prefix}_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}.txt"
     return buffer, filename
 
 
@@ -891,7 +895,7 @@ def _create_full_excel() -> tuple[io.BytesIO, str]:
     wb.save(buffer)
     buffer.seek(0)
 
-    filename = f"full_base_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}.xlsx"
+    filename = f"full_base_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}.xlsx"
     return buffer, filename
 
 
@@ -922,7 +926,7 @@ def _create_leads_excel() -> tuple[io.BytesIO, str]:
     wb.save(buffer)
     buffer.seek(0)
 
-    filename = f"leads_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}.xlsx"
+    filename = f"leads_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}.xlsx"
     return buffer, filename
 
 
@@ -965,6 +969,16 @@ def get_main_keyboard() -> ReplyKeyboardMarkup:
             [KeyboardButton(text="📋 Отчёт по лидам")],
             [KeyboardButton(text="💬 Написать в поддержку")],
             [KeyboardButton(text="🆕 Получить новые контакты")],
+        ],
+        resize_keyboard=True,
+    )
+
+
+def get_support_keyboard() -> ReplyKeyboardMarkup:
+    """Клавиатура в режиме поддержки."""
+    return ReplyKeyboardMarkup(
+        keyboard=[
+            [KeyboardButton(text="⬅️ Назад")],
         ],
         resize_keyboard=True,
     )
@@ -1520,7 +1534,7 @@ async def on_stats(message: Message) -> None:
     def _count_stats() -> tuple:
         from datetime import timedelta
         
-        now = datetime.utcnow()
+        now = datetime.now(timezone.utc)
         day_ago = now - timedelta(days=1)
         week_ago = now - timedelta(days=7)
         month_ago = now - timedelta(days=30)
@@ -1612,7 +1626,7 @@ async def on_leadstats(message: Message) -> None:
     def _count_lead_stats() -> tuple:
         from datetime import timedelta
         
-        now = datetime.utcnow()
+        now = datetime.now(timezone.utc)
         day_ago = now - timedelta(days=1)
         week_ago = now - timedelta(days=7)
         month_ago = now - timedelta(days=30)
@@ -2293,14 +2307,14 @@ async def on_request_new_contacts(message: Message, bot: Bot) -> None:
     )
 
 
-async def on_support_info(message: Message) -> None:
-    """Пользователь нажал 'Написать в поддержку' — показываем информацию."""
+async def on_support_info(message: Message, state: FSMContext) -> None:
+    """Пользователь нажал 'Написать в поддержку' — переводим в режим поддержки."""
+    await state.set_state(SupportStates.active)
     await message.answer(
-        "💬 Всё общение — через поддержку!\n\n"
-        "Просто напиши любое сообщение в бота — оно уйдёт менеджеру, "
-        "и он ответит тебе здесь.\n\n"
-        "Возникли вопросы? Появился лид? Нужно добавить лимиты на выдачу? "
-        "Пиши прямо в бота"
+        "💬 Режим поддержки\n\n"
+        "Напишите сообщение — оно уйдёт менеджеру, и он ответит вам здесь.\n\n"
+        "Нажмите «Назад», когда закончите общение.",
+        reply_markup=get_support_keyboard(),
     )
 
 
@@ -2436,7 +2450,6 @@ async def on_report_file(
     if file_id and file_type:
         items.append({"type": file_type, "file_id": file_id, "caption": caption})
         await state.update_data(report_items=items)
-        # Сразу показываем выбор категории, если есть контакт
         await _maybe_show_category_for_item(
             state, message, bot, items[-1],
             user_id=user.id,
@@ -2800,7 +2813,6 @@ async def on_report_other(message: Message, state: FSMContext, bot: Bot) -> None
     items = data.get("report_items", [])
     items.append({"type": "text", "content": content})
     await state.update_data(report_items=items)
-    # Сразу показываем выбор категории, если есть контакт
     await _maybe_show_category_for_item(
         state, message, bot, items[-1],
         user_id=user.id,
@@ -2883,7 +2895,9 @@ async def on_user_message_to_support(message: Message, bot: Bot) -> None:
             except Exception as e2:
                 await message.answer(f"❌ Не удалось отправить сообщение: {e2}")
         else:
-            await message.answer(f"❌ Не удалось отправить сообщение: {e}")
+            await message.answer(
+                f"❌ Не удалось отправить сообщение: {e}"
+            )
 
     # Любые ссылки в сообщении — добавляем как лиды (даже без режима отчёта)
     content = _extract_text_with_urls(message)
@@ -3386,8 +3400,12 @@ async def main() -> None:
     for btn_text in USER_BUTTON_MAP:
         dp.message.register(on_user_base_choice, F.text == btn_text)
 
-    # Все остальные сообщения в личном чате -> поддержка (ПОСЛЕДНИЙ хендлер!)
-    dp.message.register(on_user_message_to_support, F.chat.type == "private")
+    # Сообщения в поддержку — ТОЛЬКО когда пользователь нажал «Написать в поддержку»
+    dp.message.register(
+        on_user_message_to_support,
+        StateFilter(SupportStates.active),
+        F.chat.type == "private",
+    )
 
     print("Бот запущен!")
     await dp.start_polling(bot)
