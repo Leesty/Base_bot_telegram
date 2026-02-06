@@ -467,9 +467,11 @@ def extract_contacts_from_text(text: str) -> List[str]:
         clean_word = re.sub(r'[^\w]', '', word)
         # Только латиница, цифры, _
         if re.match(r'^[a-zA-Z0-9_]{4,32}$', clean_word):
-            # Исключаем стоп-слова
-            if clean_word.lower() not in {'https', 'http', 'telegram', 'instagram', 'whatsapp'}:
-                contacts.append(clean_word)
+            # Исключаем стоп-слова и фрагменты URL (httpstme, wwwavito и т.д.)
+            cw_lower = clean_word.lower()
+            if cw_lower not in {'https', 'http', 'telegram', 'instagram', 'whatsapp'}:
+                if not any(x in cw_lower for x in ('http', 'www', 'tme', 'vkru', 'avitoru')):
+                    contacts.append(clean_word)
     
     # Убираем дубликаты с учётом нормализации
     unique = {}
