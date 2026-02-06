@@ -2184,7 +2184,7 @@ async def on_report_start(message: Message, state: FSMContext) -> None:
         return
     
     await state.set_state(ReportStates.waiting_report)
-    await state.update_data(report_items=[])
+    await state.update_data(report_items=[], report_contact_categories={})
     await message.answer(
         "📋 Отчёт по лиду\n\n"
         "📸 Один лид = Один скриншот + Контакт лида\n\n"
@@ -2249,26 +2249,7 @@ async def _maybe_show_category_for_item(
         return
 
     if pending:
-        # Если в тексте явно указано "тг" или "tg" — сразу добавляем как Telegram
-        src_lower = source_text.lower()
-        tg_hint = (" тг" in src_lower or "тг " in src_lower or src_lower.strip() == "тг"
-                   or " tg" in src_lower or "tg " in src_lower)
-
-        if tg_hint and len(pending) == 1:
-            contact = pending[0]
-            in_base = determine_contact_type(contact, user_id) == "telegram"
-            source = "база" if in_base else "самостоятельный телеграм"
-            try:
-                if add_lead(contact, "telegram", user_id, username, source=source):
-                    await message.answer(
-                        f"✅ Добавлено в Telegram: {contact}\n\n"
-                        "Можете загрузить следующий лид или нажать «Отправить отчёт».",
-                        reply_markup=get_report_keyboard(),
-                    )
-                    return
-            except Exception:
-                pass
-
+        # Показываем выбор категории — лиды добавляются только при «Отправить отчёт»
         topics = load_support_topics()
         topic_id = topics.get(user_id)
         target_topic = topic_id if topic_id else REPORTS_TOPIC_ID
@@ -2452,13 +2433,20 @@ async def on_report_submit(
         )
         tg_hint = " тг" in content_lower or "тг " in content_lower or " tg" in content_lower or "tg " in content_lower
         username_str = user.username or ""
+        cat_map = data.get("report_contact_categories", {})
 
         for contact in unique_contacts:
             if check_lead_duplicate(contact):
                 continue
-            contact_type = determine_contact_type(contact, user_id)
-            if not contact_type or contact_type not in LEAD_TYPES:
-                contact_type = "telegram" if tg_hint else "self"
+            stored_cat = cat_map.get(normalize_contact(contact))
+            if stored_cat == "skip":
+                continue
+            if stored_cat and stored_cat in LEAD_TYPES:
+                contact_type = stored_cat
+            else:
+                contact_type = determine_contact_type(contact, user_id)
+                if not contact_type or contact_type not in LEAD_TYPES:
+                    contact_type = "telegram" if tg_hint else "self"
             in_base = bool(contact_type) and determine_contact_type(contact, user_id) == contact_type
             src_name = LEAD_TYPES[contact_type]["name"].lower()
             source = "база" if in_base else ("самостоятельный" if contact_type == "self" else f"самостоятельный {src_name}")
@@ -2531,42 +2519,18 @@ async def on_report_category_callback(callback: CallbackQuery, state: FSMContext
         await callback.message.answer("Отчёт отменён.", reply_markup=get_main_keyboard())
         return
     
+    # Сохраняем выбор категории — лиды добавляются только при «Отправить отчёт»
+    cat_map = data.get("report_contact_categories", {})
     if category == "skip":
         status = "⏭ Пропущено"
+        cat_map[normalize_contact(contact)] = "skip"
     elif category in LEAD_TYPES:
-        try:
-            # Проверяем: контакт из базы выдачи или самостоятельный
-            in_base = determine_contact_type(contact, user_id) == category
-            source = "база" if in_base else f"самостоятельный {LEAD_TYPES[category]['name'].lower()}"
-            if add_lead(contact, category, user_id, username, source=source):
-                status = f"✅ Добавлено в {LEAD_TYPES[category]['name']}"
-                user_link = f'<a href="tg://user?id={user_id}">{user_name}</a>'
-                report_link = ""
-                if topic_id and report_message_id:
-                    chat_id_short = str(SUPPORT_GROUP_ID).replace("-100", "")
-                    report_url = f"https://t.me/c/{chat_id_short}/{target_topic}/{report_message_id}"
-                    report_link = f'\n\n📨 <a href="{report_url}">Открыть отчёт</a>'
-                await bot.send_message(
-                    chat_id=SUPPORT_GROUP_ID,
-                    message_thread_id=LEADS_TOPIC_ID,
-                    text=(
-                        f"✅ Новый лид добавлен!\n\n"
-                        f"📋 Контакт: {contact}\n"
-                        f"📦 Категория: {LEAD_TYPES[category]['name']}\n\n"
-                        f"👤 От: {user_link}\n"
-                        f"🆔 ID: {user_id}\n"
-                        f"📱 @{username or 'нет'}"
-                        f"{report_link}"
-                    ),
-                    parse_mode="HTML",
-                )
-            else:
-                status = "❌ Ошибка добавления"
-        except Exception as e:
-            print(f"Ошибка добавления лида {contact}: {e}")
-            status = "❌ Ошибка"
+        status = f"✅ Выбрано: {LEAD_TYPES[category]['name']}"
+        cat_map[normalize_contact(contact)] = category
     else:
         status = "⏭ Пропущено"
+        cat_map[normalize_contact(contact)] = "skip"
+    await state.update_data(report_contact_categories=cat_map)
     
     try:
         await callback.message.edit_text(f"{status}\n\n📋 Контакт: {contact}")
@@ -2592,7 +2556,7 @@ async def on_report_category_callback(callback: CallbackQuery, state: FSMContext
             report_idx=0,
         )
         await callback.message.answer(
-            "✅ Добавлено. Можете загрузить следующий лид или нажать «Отправить отчёт».",
+            "✅ Выбор сохранён. Можете загрузить следующий лид или нажать «Отправить отчёт».",
             reply_markup=get_report_keyboard(),
         )
 
