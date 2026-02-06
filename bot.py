@@ -897,6 +897,7 @@ def get_main_keyboard() -> ReplyKeyboardMarkup:
             [KeyboardButton(text="📦 Получить списки контактов")],
             [KeyboardButton(text="📋 Отчёт по лидам")],
             [KeyboardButton(text="💬 Написать в поддержку")],
+            [KeyboardButton(text="🆕 Получить новые контакты")],
         ],
         resize_keyboard=True,
     )
@@ -2173,6 +2174,39 @@ async def on_admin_delete_cancel(message: Message, state: FSMContext) -> None:
 
 # ============ ПОДДЕРЖКА: ХЕНДЛЕРЫ ============
 
+async def on_request_new_contacts(message: Message, bot: Bot) -> None:
+    """Пользователь нажал 'Получить новые контакты' — уведомление в админский чат."""
+    user = message.from_user
+    if not user or not is_user_approved(user.id):
+        await message.answer("❌ У вас нет доступа к этой функции.")
+        return
+
+    user_link = f'<a href="tg://user?id={user.id}">{user.full_name}</a>'
+    username = user.username or "нет"
+    topics = load_support_topics()
+    topic_id = topics.get(user.id)
+    topic_link = ""
+    if topic_id:
+        chat_id_short = str(SUPPORT_GROUP_ID).replace("-100", "")
+        topic_link = f'\n\n📨 <a href="https://t.me/c/{chat_id_short}/{topic_id}">Чат с пользователем</a>'
+
+    await bot.send_message(
+        chat_id=SUPPORT_GROUP_ID,
+        message_thread_id=LEADS_TOPIC_ID,
+        text=(
+            f"🆕 Запрос на новые контакты\n\n"
+            f"👤 {user_link}\n"
+            f"🆔 ID: {user.id}\n"
+            f"📱 @{username}"
+            f"{topic_link}"
+        ),
+        parse_mode="HTML",
+    )
+    await message.answer(
+        "✅ Ваш запрос отправлен! Ожидайте, с вами свяжутся для добавления новых контактов."
+    )
+
+
 async def on_support_info(message: Message) -> None:
     """Пользователь нажал 'Написать в поддержку' — показываем информацию."""
     await message.answer(
@@ -2489,7 +2523,11 @@ async def on_report_submit(
             reply_markup=get_main_keyboard(),
         )
     except Exception as e:
-        await message.answer(f"❌ Ошибка при отправке: {e}")
+        await state.clear()
+        await message.answer(
+            f"❌ Ошибка при отправке: {e}",
+            reply_markup=get_main_keyboard(),
+        )
 
 
 async def on_report_category_callback(callback: CallbackQuery, state: FSMContext, bot: Bot) -> None:
@@ -3128,6 +3166,7 @@ async def main() -> None:
     dp.message.register(on_get_base, F.text == "📦 Получить списки контактов")
     dp.message.register(on_report_start, F.text == "📋 Отчёт по лидам")
     dp.message.register(on_support_info, F.text == "💬 Написать в поддержку")
+    dp.message.register(on_request_new_contacts, F.text == "🆕 Получить новые контакты")
     dp.message.register(on_back, F.text == "⬅️ Назад")
 
     # Отчёты: сбор и отправка (ДО on_user_message_to_support!)
