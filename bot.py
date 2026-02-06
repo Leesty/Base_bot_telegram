@@ -2575,8 +2575,12 @@ async def on_report_submit(
         username_str = user.username or ""
         cat_map = data.get("report_contact_categories", {})
 
+        duplicates_in_report = []
         for contact in unique_contacts:
-            if check_lead_duplicate(contact):
+            duplicate = check_lead_duplicate(contact)
+            if duplicate:
+                dup_type, dup_user_id, dup_username = duplicate
+                duplicates_in_report.append((contact, dup_type, dup_user_id, dup_username))
                 continue
             stored_cat = cat_map.get(normalize_contact(contact))
             if stored_cat == "skip":
@@ -2618,10 +2622,32 @@ async def on_report_submit(
             except Exception as e:
                 print(f"Ошибка добавления лида {contact}: {e}")
 
-        await message.answer(
-            "✅ Отчёт отправлен!",
-            reply_markup=get_main_keyboard(),
-        )
+        if duplicates_in_report:
+            dup_text = "\n".join(
+                f"• {c} (в базе: {LEAD_TYPES.get(t, {}).get('name', t)}, от {uid} @{un})"
+                for c, t, uid, un in duplicates_in_report
+            )
+            await bot.send_message(
+                chat_id=SUPPORT_GROUP_ID,
+                message_thread_id=LEADS_TOPIC_ID,
+                text=(
+                    f"⚠️ Дубликаты в отчёте (не добавлены)\n\n"
+                    f"👤 От: {user.full_name} (@{username_str or 'нет'})\n"
+                    f"🆔 ID: {user_id}\n\n"
+                    f"{dup_text}"
+                ),
+            )
+            dup_list = ", ".join(c for c, *_ in duplicates_in_report)
+            await message.answer(
+                f"✅ Отчёт отправлен!\n\n"
+                f"⚠️ Не добавлены (уже в базе): {dup_list}",
+                reply_markup=get_main_keyboard(),
+            )
+        else:
+            await message.answer(
+                "✅ Отчёт отправлен!",
+                reply_markup=get_main_keyboard(),
+            )
     except Exception as e:
         await state.clear()
         await message.answer(
@@ -2882,7 +2908,24 @@ async def on_user_message_to_support(message: Message, bot: Bot) -> None:
             kwork_hint = bool(KWORK_LEAD_KEYWORDS.search(content))
 
             for contact in contacts:
-                if check_lead_duplicate(contact):
+                duplicate = check_lead_duplicate(contact)
+                if duplicate:
+                    dup_type, dup_user_id, dup_username = duplicate
+                    await bot.send_message(
+                        chat_id=SUPPORT_GROUP_ID,
+                        message_thread_id=LEADS_TOPIC_ID,
+                        text=(
+                            f"⚠️ Дубликат лида (не добавлен)\n\n"
+                            f"📋 Контакт: {contact}\n"
+                            f"📦 Уже в базе: {LEAD_TYPES.get(dup_type, {}).get('name', dup_type)}\n"
+                            f"👤 Отправил: {user.full_name} (@{username or 'нет'})\n"
+                            f"🆔 ID: {user_id}\n"
+                            f"📌 Добавлен ранее: {dup_user_id} (@{dup_username})"
+                        ),
+                    )
+                    await message.answer(
+                        f"⚠️ Контакт {contact} уже есть в базе, повторно не добавлен."
+                    )
                     continue
                 contact_type = determine_contact_type(contact, user_id)
                 if not contact_type or contact_type not in LEAD_TYPES:
