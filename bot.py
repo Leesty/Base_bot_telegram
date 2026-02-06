@@ -115,6 +115,7 @@ LEAD_TYPES = {
     "vk": {"name": "ВКонтакте", "csv": "leads_vk.csv"},
     "ok": {"name": "Одноклассники", "csv": "leads_ok.csv"},
     "email": {"name": "Почта", "csv": "leads_email.csv"},
+    "avito": {"name": "Авито", "csv": "leads_avito.csv"},
     "self": {"name": "Самостоятельные лиды", "csv": "leads_self.csv"},
 }
 
@@ -405,7 +406,7 @@ def normalize_contact(contact: str) -> str:
     c = c.replace("https://", "").replace("http://", "").replace("www.", "")
     
     # Убираем @ и домены для username
-    c = c.replace("@", "").replace("t.me/", "").replace("vk.com/", "").replace("vk.ru/", "").replace("instagram.com/", "")
+    c = c.replace("@", "").replace("t.me/", "").replace("vk.com/", "").replace("vk.ru/", "").replace("instagram.com/", "").replace("avito.ru/", "")
     
     # Для номеров: убираем пробелы, скобки, дефисы
     c_digits = re.sub(r'[\s\-\(\)\+]', '', c)
@@ -442,6 +443,14 @@ def extract_contacts_from_text(text: str) -> List[str]:
     vk_links = re.findall(r'(?:https?://)?vk\.(?:com|ru)/([a-zA-Z0-9_]+)', text, re.IGNORECASE)
     contacts.extend([u for u in vk_links])
     
+    # avito.ru/... (объявления, бренды и т.д.)
+    avito_links = re.findall(r'(?:https?://)?(?:www\.)?avito\.ru/([a-zA-Z0-9_/\-]+)', text, re.IGNORECASE)
+    # Убираем query-параметры и сохраняем путь
+    for path in avito_links:
+        path_clean = path.split("?")[0].strip("/")
+        if path_clean:
+            contacts.append(f"avito.ru/{path_clean}")
+    
     # instagram.com/username
     ig_links = re.findall(r'(?:https?://)?(?:www\.)?instagram\.com/([a-zA-Z0-9_.]+)', text, re.IGNORECASE)
     contacts.extend([u for u in ig_links])
@@ -474,6 +483,10 @@ def extract_contacts_from_text(text: str) -> List[str]:
 
 def determine_contact_type(contact: str, user_id: int) -> Optional[str]:
     """Определяет тип контакта по выданным пользователю базам (или всей базе)."""
+    # Ссылки на Авито — сразу категория avito
+    if contact and ("avito.ru" in contact.lower() or contact.lower().startswith("avito")):
+        return "avito"
+    
     contact_normalized = normalize_contact(contact)
     
     # Сначала проверяем выданные конкретному пользователю
@@ -942,6 +955,7 @@ def get_lead_category_keyboard() -> ReplyKeyboardMarkup:
                 KeyboardButton(text="🟠 Одноклассники"),
                 KeyboardButton(text="📧 Почта"),
             ],
+            [KeyboardButton(text="🟢 Авито")],
             [KeyboardButton(text="🔵 Самостоятельные лиды")],
             [KeyboardButton(text="⬅️ Отмена")],
         ],
@@ -1501,6 +1515,7 @@ async def on_add_lead_category(message: Message, state: FSMContext, bot: Bot) ->
         "👥 ВКонтакте": "vk",
         "🟠 Одноклассники": "ok",
         "📧 Почта": "email",
+        "🟢 Авито": "avito",
         "🔵 Самостоятельные лиды": "self",
     }
     
@@ -2051,7 +2066,7 @@ async def on_report_start(message: Message, state: FSMContext) -> None:
         "🔴 ВАЖНО:\n"
         "Сюда ТОЛЬКО скриншот + контакт.\n"
         "БЕЗ описаний, вопросов и комментариев.\n\n"
-        "💬 Вопросы и всё остальное — в поддержку через главное меню.\n\n"
+        "💬 Вопросы и всё остальное — пишите в поддержку бота или в группу «Работа».\n\n"
         "✅ Всё загрузили? Жми «Отправить отчёт» 👇",
         reply_markup=get_report_keyboard(),
     )
