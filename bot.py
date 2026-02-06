@@ -552,10 +552,12 @@ def extract_contacts_from_text(text: str) -> List[str]:
         if not any(digits in pid or pid in digits for pid in ok_profile_ids):
             contacts.append(p)
     
-    # kwork.ru/username или youdo.com (Кворк)
-    kwork_links = re.findall(r'(?:https?://)?(?:www\.)?kwork\.ru/([a-zA-Z0-9_\-]+)', text, re.IGNORECASE)
+    # kwork.ru/user/username или kwork.ru/username (Кворк)
+    kwork_links = re.findall(r'(?:https?://)?(?:www\.)?kwork\.ru/([a-zA-Z0-9_/\-]+)', text, re.IGNORECASE)
     for u in kwork_links:
-        contacts.append(f"kwork.ru/{u.split('?')[0]}")
+        clean = u.split("?")[0].strip("/")
+        if clean:
+            contacts.append(f"kwork.ru/{clean}")
     
     # Если в тексте есть "кворк" — извлекаем также plain username/ID (ElenaTuz и т.д.)
     if KWORK_LEAD_KEYWORDS.search(text):
