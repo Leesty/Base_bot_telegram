@@ -548,13 +548,21 @@ def extract_contacts_from_text(text: str) -> List[str]:
     
     # Только ссылки, @username и номера — любые другие слова игнорируются
     
-    # Убираем дубликаты с учётом нормализации
+    # Убираем дубликаты с учётом нормализации.
+    # При коллизии (одинаковый username на разных платформах) приоритет у формы с явной платформой
+    # (instagram.com/, vk.ru/ и т.д.), чтобы категория определялась верно.
+    def has_platform_prefix(s: str) -> bool:
+        return any(s.lower().startswith(p) for p in ("instagram.com/", "vk.com/", "vk.ru/", "t.me/", "avito.ru/", "kwork.ru/"))
     unique = {}
     for c in contacts:
         normalized = normalize_contact(c)
-        if normalized and normalized not in unique:
+        if not normalized:
+            continue
+        existing = unique.get(normalized)
+        if existing is None:
             unique[normalized] = c
-    
+        elif has_platform_prefix(c) and not has_platform_prefix(existing):
+            unique[normalized] = c
     return list(unique.values())
 
 
@@ -1557,8 +1565,8 @@ async def on_stats(message: Message) -> None:
             for row in rows[1:]:
                 if len(row) >= 4 and row[3]:  # Есть дата выдачи
                     try:
-                        # Формат: "YYYY.MM.DD HH:MM:SS"
-                        issued_date = datetime.strptime(row[3], "%Y.%m.%d %H:%M:%S")
+                        # Формат: "YYYY.MM.DD HH:MM:SS" — считаем UTC для корректного сравнения
+                        issued_date = datetime.strptime(row[3], "%Y.%m.%d %H:%M:%S").replace(tzinfo=timezone.utc)
                         if issued_date >= day_ago:
                             day_count += 1
                         if issued_date >= week_ago:
