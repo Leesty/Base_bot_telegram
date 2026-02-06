@@ -405,7 +405,7 @@ def normalize_contact(contact: str) -> str:
     c = c.replace("https://", "").replace("http://", "").replace("www.", "")
     
     # Убираем @ и домены для username
-    c = c.replace("@", "").replace("t.me/", "").replace("vk.com/", "").replace("instagram.com/", "")
+    c = c.replace("@", "").replace("t.me/", "").replace("vk.com/", "").replace("vk.ru/", "").replace("instagram.com/", "")
     
     # Для номеров: убираем пробелы, скобки, дефисы
     c_digits = re.sub(r'[\s\-\(\)\+]', '', c)
@@ -438,8 +438,8 @@ def extract_contacts_from_text(text: str) -> List[str]:
     tg_links = re.findall(r'(?:https?://)?t\.me/([a-zA-Z0-9_]+)', text, re.IGNORECASE)
     contacts.extend([u for u in tg_links])
     
-    # vk.com/id123 или vk.com/username
-    vk_links = re.findall(r'(?:https?://)?vk\.com/([a-zA-Z0-9_]+)', text, re.IGNORECASE)
+    # vk.com/id123 или vk.ru/username
+    vk_links = re.findall(r'(?:https?://)?vk\.(?:com|ru)/([a-zA-Z0-9_]+)', text, re.IGNORECASE)
     contacts.extend([u for u in vk_links])
     
     # instagram.com/username
@@ -2133,11 +2133,13 @@ async def on_report_submit(
         )
         
         # Файлы — в обычный чат поддержки пользователя
-        await bot.send_message(
+        report_msg = await bot.send_message(
             chat_id=SUPPORT_GROUP_ID,
             message_thread_id=target_topic,
             text=f"📋 Отчёт от {user.full_name} (@{user.username or 'нет'}):",
         )
+        report_message_id = report_msg.message_id
+        
         for item in items:
             ft = item["type"]
             if ft == "text":
@@ -2218,6 +2220,16 @@ async def on_report_submit(
         
         # Уведомления о дубликатах
         if duplicates_found:
+            # Формируем ссылки
+            user_link = f'<a href="tg://user?id={user_id}">{user.full_name}</a>'
+            
+            # Ссылка на топик и сообщение с отчетом (если есть топик)
+            report_link = ""
+            if topic_id:
+                chat_id_short = str(SUPPORT_GROUP_ID).replace("-100", "")
+                report_url = f"https://t.me/c/{chat_id_short}/{target_topic}/{report_message_id}"
+                report_link = f'\n\n📨 <a href="{report_url}">Открыть отчёт со скринами</a>'
+            
             for dup in duplicates_found:
                 await bot.send_message(
                     chat_id=SUPPORT_GROUP_ID,
@@ -2227,17 +2239,29 @@ async def on_report_submit(
                         f"📋 Лид: {dup['contact']}\n"
                         f"📦 Тип: {dup['type']}\n\n"
                         f"Попытался добавить:\n"
-                        f"👤 {user.full_name}\n"
+                        f"👤 {user_link}\n"
                         f"🆔 ID: {user_id}\n"
-                        f"📱 @{user.username or 'нет'}\n\n"
+                        f"📱 @{user.username or 'нет'}"
+                        f"{report_link}\n\n"
                         f"Уже в базе от:\n"
                         f"🆔 ID: {dup['original_user_id']}\n"
                         f"📱 @{dup['original_username']}"
                     ),
+                    parse_mode="HTML",
                 )
         
         # Уведомление о добавленных лидах
         if leads_added:
+            # Формируем ссылки
+            user_link = f'<a href="tg://user?id={user_id}">{user.full_name}</a>'
+            
+            # Ссылка на топик и сообщение с отчетом (если есть топик)
+            report_link = ""
+            if topic_id:
+                chat_id_short = str(SUPPORT_GROUP_ID).replace("-100", "")
+                report_url = f"https://t.me/c/{chat_id_short}/{target_topic}/{report_message_id}"
+                report_link = f'\n\n📨 <a href="{report_url}">Открыть отчёт со скринами</a>'
+            
             for lead in leads_added:
                 await bot.send_message(
                     chat_id=SUPPORT_GROUP_ID,
@@ -2246,10 +2270,12 @@ async def on_report_submit(
                         f"✅ Новый лид добавлен!\n\n"
                         f"📋 Контакт: {lead['contact']}\n"
                         f"📦 Категория: {lead['type_name']}\n\n"
-                        f"👤 От: {user.full_name}\n"
+                        f"👤 От: {user_link}\n"
                         f"🆔 ID: {user_id}\n"
                         f"📱 @{user.username or 'нет'}"
+                        f"{report_link}"
                     ),
+                    parse_mode="HTML",
                 )
         
         await state.clear()
