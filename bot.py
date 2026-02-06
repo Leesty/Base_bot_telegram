@@ -521,14 +521,36 @@ def extract_contacts_from_text(text: str) -> List[str]:
         re.IGNORECASE,
     )
     for url in yula_links:
-        # Убираем trailing punctuation
         url_clean = url.rstrip('.,;:!?')
         if url_clean:
             contacts.append(url_clean)
     
-    # Телефонные номера (различные форматы)
+    # ok.ru (Одноклассники) — profile/ID и username
+    ok_profile_ids = re.findall(
+        r'(?:https?://)?(?:www\.)?ok\.ru/profile/(\d+)',
+        text,
+        re.IGNORECASE,
+    )
+    for pid in ok_profile_ids:
+        contacts.append(f"ok.ru/profile/{pid}")
+    ok_usernames = re.findall(
+        r'(?:https?://)?(?:www\.)?ok\.ru/([a-zA-Z0-9_.\-]+)',
+        text,
+        re.IGNORECASE,
+    )
+    for u in ok_usernames:
+        if u == "profile" or u.startswith("profile/"):
+            continue  # уже добавлены через ok_profile_ids
+        clean = u.split("?")[0].rstrip("/")
+        if clean and f"ok.ru/{clean}" not in contacts:
+            contacts.append(f"ok.ru/{clean}")
+    
+    # Телефонные номера — исключаем те, что являются подстрокой ID из ok.ru (586438915595 → 86438915595)
     phones = re.findall(r'[\+]?[78][\s\-]?[\(]?\d{3}[\)]?[\s\-]?\d{3}[\s\-]?\d{2}[\s\-]?\d{2}', text)
-    contacts.extend([p for p in phones])
+    for p in phones:
+        digits = re.sub(r'\D', '', p)
+        if not any(digits in pid or pid in digits for pid in ok_profile_ids):
+            contacts.append(p)
     
     # kwork.ru/username или youdo.com (Кворк)
     kwork_links = re.findall(r'(?:https?://)?(?:www\.)?kwork\.ru/([a-zA-Z0-9_\-]+)', text, re.IGNORECASE)
@@ -552,7 +574,7 @@ def extract_contacts_from_text(text: str) -> List[str]:
     # При коллизии (одинаковый username на разных платформах) приоритет у формы с явной платформой
     # (instagram.com/, vk.ru/ и т.д.), чтобы категория определялась верно.
     def has_platform_prefix(s: str) -> bool:
-        return any(s.lower().startswith(p) for p in ("instagram.com/", "vk.com/", "vk.ru/", "t.me/", "avito.ru/", "kwork.ru/"))
+        return any(s.lower().startswith(p) for p in ("instagram.com/", "vk.com/", "vk.ru/", "t.me/", "avito.ru/", "kwork.ru/", "ok.ru/"))
     unique = {}
     for c in contacts:
         normalized = normalize_contact(c)
@@ -587,6 +609,10 @@ def determine_contact_type(contact: str, user_id: int) -> Optional[str]:
     # Ссылки на VK — сразу категория ВКонтакте (как Instagram)
     if contact and ("vk.com" in contact.lower() or "vk.ru" in contact.lower()):
         return "vk"
+    
+    # Ссылки на Одноклассники (ok.ru)
+    if contact and "ok.ru" in contact.lower():
+        return "ok"
     
     # Остальное — проверяем в базах выдачи
     # Проверяем и в базе: возможно выдан пользователю
