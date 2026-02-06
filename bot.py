@@ -74,6 +74,12 @@ LEADS_TOPIC_ID = 769
 LEAD_TIMEZONE = "Europe/Moscow"
 LEAD_DAY_CUTOFF_HOUR = 20
 
+# Пауза между сообщениями в группу (защита от Flood control)
+FLOOD_DELAY = 0.4
+
+# Лимит лидов в одном отчёте (защита от спама и Flood control)
+REPORT_LEADS_LIMIT = 5
+
 # Карта названий листов Excel -> внутренние ключи (для загрузки через админку)
 EXCEL_SHEET_MAP = {
     # Короткие названия
@@ -997,6 +1003,52 @@ def _create_daily_leads_excel(date: str) -> tuple[io.BytesIO, str]:
     wb.save(buffer)
     buffer.seek(0)
     filename = f"leads_day_{date}.xlsx"
+    return buffer, filename
+
+
+def _create_user_leads_excel(user_id: int, all_time: bool, date: str = "") -> tuple[io.BytesIO, str]:
+    """Создаёт Excel с лидами пользователя. all_time=True — из основных CSV, False — из дневных."""
+    wb = Workbook()
+    first = True
+    user_id_str = str(user_id)
+
+    for key, info in LEAD_TYPES.items():
+        if all_time:
+            csv_path = info["csv"]
+            rows = _read_csv(csv_path) if os.path.exists(csv_path) else [LEADS_CSV_HEADER]
+        else:
+            daily_path = _get_daily_leads_path(key, date)
+            rows = _read_csv(daily_path) if daily_path and os.path.exists(daily_path) else [LEADS_CSV_HEADER]
+
+        user_rows = [rows[0]]
+        for row in rows[1:]:
+            if len(row) >= 2 and str(row[1]).strip() == user_id_str:
+                user_rows.append(row)
+
+        if len(user_rows) <= 1:
+            continue
+
+        sheet_name = f"{info['name']} ({len(user_rows) - 1})"
+        if first:
+            ws = wb.active
+            ws.title = sheet_name[:31]
+            first = False
+        else:
+            ws = wb.create_sheet(title=sheet_name[:31])
+        for row in user_rows:
+            ws.append(row)
+
+    if first:
+        ws = wb.active
+        ws.append(LEADS_CSV_HEADER)
+
+    buffer = io.BytesIO()
+    wb.save(buffer)
+    buffer.seek(0)
+    if all_time:
+        filename = f"leads_user_{user_id}_all.xlsx"
+    else:
+        filename = f"leads_user_{user_id}_day_{date}.xlsx"
     return buffer, filename
 
 
@@ -2038,11 +2090,12 @@ async def on_user_base_choice(message: Message, state: FSMContext, bot: Bot) -> 
         # Если слишком длинный, разбиваем на части
         await message.answer(f"✅ Выдано из «{info['name']}»: {len(values)} контактов")
         
-        # Отправляем по частям
+        # Отправляем по частям (пауза — защита от Flood control)
         chunk = ""
         for val in values:
             if len(chunk) + len(val) + 1 > 4000:
                 await message.answer(chunk)
+                await asyncio.sleep(FLOOD_DELAY)
                 chunk = val
             else:
                 chunk = chunk + "\n" + val if chunk else val
@@ -2352,6 +2405,58 @@ async def on_user_lead_stats(message: Message) -> None:
     )
 
 
+# ============ CHECK_LEADS — ЛИДЫ ПОЛЬЗОВАТЕЛЯ ============
+
+async def on_check_leads(message: Message, bot: Bot) -> None:
+    """Команда /check_leads — статистика и Excel лидов пользователя (в чате с ним)."""
+    if message.chat.id != SUPPORT_GROUP_ID:
+        return
+
+    topic_id = message.message_thread_id
+    if not topic_id:
+        await message.answer("❌ Используйте команду /check_leads внутри чата с пользователем (в топике).")
+        return
+
+    user_id = get_user_by_topic(topic_id)
+    if not user_id:
+        await message.answer("❌ Не удалось определить пользователя по этому чату.")
+        return
+
+    try:
+        user_chat = await bot.get_chat(user_id)
+        user_name = user_chat.full_name or f"User_{user_id}"
+        username = user_chat.username or "нет"
+    except Exception:
+        user_name = f"User_{user_id}"
+        username = "нет"
+
+    await message.answer("⏳ Собираю данные...")
+
+    count_today, count_all = await asyncio.to_thread(_count_user_leads, user_id)
+    today = get_current_lead_day()
+
+    text = (
+        f"📊 Лиды пользователя {user_name}\n"
+        f"🆔 ID: {user_id}\n"
+        f"📱 @{username}\n\n"
+        f"📅 За текущий день: {count_today}\n"
+        f"📈 За всё время: {count_all}"
+    )
+    await message.answer(text)
+    await asyncio.sleep(FLOOD_DELAY)
+
+    try:
+        buf_all, name_all = await asyncio.to_thread(_create_user_leads_excel, user_id, True)
+        buf_day, name_day = await asyncio.to_thread(_create_user_leads_excel, user_id, False, today)
+        doc_all = BufferedInputFile(buf_all.read(), filename=name_all)
+        doc_day = BufferedInputFile(buf_day.read(), filename=name_day)
+        await message.answer_document(doc_all, caption="📤 Лиды за всё время")
+        await asyncio.sleep(FLOOD_DELAY)
+        await message.answer_document(doc_day, caption=f"📤 Лиды за {today}")
+    except Exception as e:
+        await message.answer(f"❌ Ошибка при создании файлов: {e}")
+
+
 # ============ ПОДДЕРЖКА: ХЕНДЛЕРЫ ============
 
 async def on_request_new_contacts(message: Message, bot: Bot) -> None:
@@ -2410,8 +2515,8 @@ async def on_report_start(message: Message, state: FSMContext) -> None:
     await state.set_state(ReportStates.waiting_report)
     await state.update_data(report_items=[], report_contact_categories={})
     await message.answer(
-        "📋 Отчёт по лиду\n\n"
-        "📸 Один лид = Один скриншот + Контакт лида\n\n"
+        "📋 Отчёт по лидам\n\n"
+        f"📸 Максимум {REPORT_LEADS_LIMIT} лидов в одном отчёте. Один лид = скриншот + контакт.\n\n"
         "Формат:\n"
         "1️⃣ Скриншот переписки/результата\n"
         "2️⃣ Под ним — @username, ссылка или номер телефона\n\n"
@@ -2528,6 +2633,13 @@ async def on_report_file(
         file_type = "video"
     
     if file_id and file_type:
+        if len(items) >= REPORT_LEADS_LIMIT:
+            await message.answer(
+                f"📋 Достигнут лимит {REPORT_LEADS_LIMIT} лидов в отчёте.\n\n"
+                "Нажмите «Отправить отчёт» для отправки.",
+                reply_markup=get_report_keyboard(),
+            )
+            return
         items.append({"type": file_type, "file_id": file_id, "caption": caption})
         await state.update_data(report_items=items)
         await _maybe_show_category_for_item(
@@ -2633,6 +2745,7 @@ async def on_report_submit(
                     video=item["file_id"],
                     caption=cap,
                 )
+            await asyncio.sleep(FLOOD_DELAY)
 
         # Извлекаем контакты из отчёта и добавляем в лиды (как в чате поддержки)
         ensure_leads_csv_exists()
@@ -2712,6 +2825,7 @@ async def on_report_submit(
                         ),
                         parse_mode="HTML",
                     )
+                    await asyncio.sleep(FLOOD_DELAY)
             except Exception as e:
                 print(f"Ошибка добавления лида {contact}: {e}")
 
@@ -2730,6 +2844,7 @@ async def on_report_submit(
                     f"{dup_text}"
                 ),
             )
+            await asyncio.sleep(FLOOD_DELAY)
             dup_list = ", ".join(c for c, *_ in duplicates_in_report)
             await message.answer(
                 f"✅ Отчёт отправлен!\n\n"
@@ -2849,13 +2964,27 @@ async def on_report_waiting_category_remind(message: Message, state: FSMContext)
         if file_id and file_type:
             data = await state.get_data()
             items = data.get("report_items", [])
-            items.append({"type": file_type, "file_id": file_id, "caption": caption})
-            await state.update_data(report_items=items)
+            if len(items) < REPORT_LEADS_LIMIT:
+                items.append({"type": file_type, "file_id": file_id, "caption": caption})
+                await state.update_data(report_items=items)
+            else:
+                await message.answer(
+                    f"📋 Достигнут лимит {REPORT_LEADS_LIMIT} лидов. Нажмите «Отправить отчёт».",
+                    reply_markup=get_report_keyboard(),
+                )
+                return
     elif content:
         data = await state.get_data()
         items = data.get("report_items", [])
-        items.append({"type": "text", "content": content})
-        await state.update_data(report_items=items)
+        if len(items) < REPORT_LEADS_LIMIT:
+            items.append({"type": "text", "content": content})
+            await state.update_data(report_items=items)
+        else:
+            await message.answer(
+                f"📋 Достигнут лимит {REPORT_LEADS_LIMIT} лидов. Нажмите «Отправить отчёт».",
+                reply_markup=get_report_keyboard(),
+            )
+            return
 
     await message.answer("👆 Сначала выберите категорию для текущего лида выше, затем можно загрузить следующий.")
 
@@ -2891,6 +3020,13 @@ async def on_report_other(message: Message, state: FSMContext, bot: Bot) -> None
     
     data = await state.get_data()
     items = data.get("report_items", [])
+    if len(items) >= REPORT_LEADS_LIMIT:
+        await message.answer(
+            f"📋 Достигнут лимит {REPORT_LEADS_LIMIT} лидов в отчёте.\n\n"
+            "Нажмите «Отправить отчёт» для отправки.",
+            reply_markup=get_report_keyboard(),
+        )
+        return
     items.append({"type": "text", "content": content})
     await state.update_data(report_items=items)
     await _maybe_show_category_for_item(
@@ -3017,9 +3153,11 @@ async def on_user_message_to_support(message: Message, bot: Bot) -> None:
                             f"📌 Добавлен ранее: {dup_user_id} (@{dup_username})"
                         ),
                     )
+                    await asyncio.sleep(FLOOD_DELAY)
                     await message.answer(
                         f"⚠️ Контакт {contact} уже есть в базе, повторно не добавлен."
                     )
+                    await asyncio.sleep(FLOOD_DELAY)
                     continue
                 contact_type = determine_contact_type(contact, user_id)
                 if not contact_type or contact_type not in LEAD_TYPES:
@@ -3047,6 +3185,7 @@ async def on_user_message_to_support(message: Message, bot: Bot) -> None:
                             ),
                             parse_mode="HTML",
                         )
+                        await asyncio.sleep(FLOOD_DELAY)
                 except Exception as e:
                     print(f"Ошибка добавления лида {contact}: {e}")
 
@@ -3325,6 +3464,7 @@ async def main() -> None:
     dp.message.register(on_download_lead_day, Command("download_lead_day"))
     dp.message.register(on_add_lead_start, Command("add_lead"))
     dp.message.register(on_delete_lead_start, Command("delete_lead"))
+    dp.message.register(on_check_leads, Command("check_leads"), F.chat.id == SUPPORT_GROUP_ID)
     
     # Ручное добавление лида (состояния)
     dp.message.register(
