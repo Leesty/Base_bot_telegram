@@ -119,6 +119,7 @@ LEAD_TYPES = {
     "ok": {"name": "Одноклассники", "csv": "leads_ok.csv"},
     "email": {"name": "Почта", "csv": "leads_email.csv"},
     "avito": {"name": "Авито", "csv": "leads_avito.csv"},
+    "yula": {"name": "Юла", "csv": "leads_yula.csv"},
     "self": {"name": "Самостоятельные лиды", "csv": "leads_self.csv"},
 }
 
@@ -405,6 +406,10 @@ def normalize_contact(contact: str) -> str:
     
     c = contact.strip().lower()
     
+    # Полные ссылки Юла/mail.ru — оставляем как есть для сравнения дубликатов
+    if "mail.ru" in c or "youla.ru" in c:
+        return c.replace("https://", "").replace("http://", "").replace("www.", "")
+    
     # Убираем протоколы и www
     c = c.replace("https://", "").replace("http://", "").replace("www.", "")
     
@@ -426,6 +431,13 @@ def normalize_contact(contact: str) -> str:
     
     # Иначе возвращаем как username (без @ и доменов)
     return c
+
+
+# Ключевые слова: если есть в тексте рядом с лидом — категория "Самостоятельные лиды"
+SELF_LEAD_KEYWORDS = re.compile(r'\b(сам|сама|самостоятельно)\b', re.IGNORECASE)
+
+# Ключевые слова: если есть в тексте рядом с лидом — категория "Юла"
+YULA_LEAD_KEYWORDS = re.compile(r'\bюла\b', re.IGNORECASE)
 
 
 def extract_contacts_from_text(text: str) -> List[str]:
@@ -454,27 +466,28 @@ def extract_contacts_from_text(text: str) -> List[str]:
         if path_clean:
             contacts.append(f"avito.ru/{path_clean}")
     
-    # instagram.com/username
+    # instagram.com/username (убираем query-параметры ?igsh=...)
     ig_links = re.findall(r'(?:https?://)?(?:www\.)?instagram\.com/([a-zA-Z0-9_.]+)', text, re.IGNORECASE)
-    contacts.extend([u for u in ig_links])
+    for u in ig_links:
+        contacts.append(u.split("?")[0].strip())  # только username, без параметров
+    
+    # Юла / mail.ru (trk.mail.ru, youla.ru) — сохраняем полную ссылку
+    yula_links = re.findall(
+        r'https?://(?:trk\.mail\.ru/[\S]+|(?:www\.)?(?:m\.)?youla\.ru/[\S]+)',
+        text,
+        re.IGNORECASE,
+    )
+    for url in yula_links:
+        # Убираем trailing punctuation
+        url_clean = url.rstrip('.,;:!?')
+        if url_clean:
+            contacts.append(url_clean)
     
     # Телефонные номера (различные форматы)
     phones = re.findall(r'[\+]?[78][\s\-]?[\(]?\d{3}[\)]?[\s\-]?\d{3}[\s\-]?\d{2}[\s\-]?\d{2}', text)
     contacts.extend([p for p in phones])
     
-    # Простые username без @ (латиница/цифры/_, минимум 4 символа)
-    # Только строки из ОДНОГО слова (не часть предложения)
-    words = text.split()
-    for word in words:
-        # Убираем знаки препинания
-        clean_word = re.sub(r'[^\w]', '', word)
-        # Только латиница, цифры, _
-        if re.match(r'^[a-zA-Z0-9_]{4,32}$', clean_word):
-            # Исключаем стоп-слова и фрагменты URL (httpstme, wwwavito и т.д.)
-            cw_lower = clean_word.lower()
-            if cw_lower not in {'https', 'http', 'telegram', 'instagram', 'whatsapp'}:
-                if not any(x in cw_lower for x in ('http', 'www', 'tme', 'vkru', 'avitoru')):
-                    contacts.append(clean_word)
+    # Только ссылки, @username и номера — любые другие слова игнорируются
     
     # Убираем дубликаты с учётом нормализации
     unique = {}
@@ -491,6 +504,10 @@ def determine_contact_type(contact: str, user_id: int) -> Optional[str]:
     # Ссылки на Авито — сразу категория avito
     if contact and ("avito.ru" in contact.lower() or contact.lower().startswith("avito")):
         return "avito"
+    
+    # Ссылки на Юлу (mail.ru, youla.ru)
+    if contact and ("mail.ru" in contact.lower() or "youla.ru" in contact.lower()):
+        return "yula"
     
     contact_normalized = normalize_contact(contact)
     
@@ -987,7 +1004,10 @@ def get_lead_category_inline_keyboard() -> InlineKeyboardMarkup:
             InlineKeyboardButton(text="🟠 Одноклассники", callback_data="lead_cat_ok"),
             InlineKeyboardButton(text="📧 Почта", callback_data="lead_cat_email"),
         ],
-        [InlineKeyboardButton(text="🟢 Авито", callback_data="lead_cat_avito")],
+        [
+            InlineKeyboardButton(text="🟢 Авито", callback_data="lead_cat_avito"),
+            InlineKeyboardButton(text="🟡 Юла", callback_data="lead_cat_yula"),
+        ],
         [InlineKeyboardButton(text="🔵 Самостоятельные лиды", callback_data="lead_cat_self")],
         [InlineKeyboardButton(text="⬅️ Отмена", callback_data="lead_cat_cancel")],
     ])
@@ -1540,6 +1560,7 @@ LEAD_CATEGORY_CALLBACK_MAP = {
     "lead_cat_ok": "ok",
     "lead_cat_email": "email",
     "lead_cat_avito": "avito",
+    "lead_cat_yula": "yula",
     "lead_cat_self": "self",
 }
 
@@ -2232,22 +2253,34 @@ async def on_report_submit(
                 )
         
         # ============ ОБРАБОТКА ЛИДОВ ============
-        # Извлекаем все контакты из отчёта
-        all_contacts = []
+        # Извлекаем контакты с источником (contact, source_text)
+        all_contacts_with_source = []  # [(contact, source_text), ...]
         for item in items:
+            source_text = ""
             if item["type"] == "text":
-                all_contacts.extend(extract_contacts_from_text(item["content"]))
+                source_text = item.get("content", "") or ""
             elif item["type"] in ("photo", "document", "video"):
-                caption = item.get("caption", "")
-                if caption:
-                    all_contacts.extend(extract_contacts_from_text(caption))
+                source_text = item.get("caption", "") or ""
+            
+            if source_text:
+                contacts = extract_contacts_from_text(source_text)
+                for c in contacts:
+                    all_contacts_with_source.append((c, source_text))
+        
+        # Убираем дубликаты контактов (оставляем первый источник)
+        seen = {}
+        unique_contacts = []
+        for contact, source in all_contacts_with_source:
+            norm = normalize_contact(contact)
+            if norm and norm not in seen:
+                seen[norm] = (contact, source)
+                unique_contacts.append((contact, source))
         
         # Обрабатываем каждый контакт
         leads_added = []  # Список добавленных лидов с деталями
         duplicates_found = []
-        unrecognized = []  # Лиды, категорию которых не удалось определить
         
-        for contact in all_contacts:
+        for contact, source_text in unique_contacts:
             # Проверяем дубликат
             duplicate = check_lead_duplicate(contact)
             if duplicate:
@@ -2261,11 +2294,16 @@ async def on_report_submit(
                 continue
             
             # Определяем тип контакта
-            contact_type = determine_contact_type(contact, user_id)
-            
-            # Если не нашли в базе контактов — добавляем как "Самостоятельный лид"
-            if not contact_type:
+            # Ключевые слова в тексте: "сам"/"самостоятельно" -> Самостоятельные; "юла" -> Юла
+            if SELF_LEAD_KEYWORDS.search(source_text):
                 contact_type = "self"
+            elif YULA_LEAD_KEYWORDS.search(source_text):
+                contact_type = "yula"
+            else:
+                contact_type = determine_contact_type(contact, user_id)
+                # Если не нашли в базе контактов — добавляем как "Самостоятельный лид"
+                if not contact_type:
+                    contact_type = "self"
             
             # Добавляем лид
             success = add_lead(contact, contact_type, user_id, user.username or "")
