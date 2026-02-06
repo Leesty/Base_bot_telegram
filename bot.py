@@ -392,6 +392,37 @@ def ensure_leads_csv_exists() -> None:
 
 import re
 
+
+def normalize_contact(contact: str) -> str:
+    """Нормализует контакт для сравнения (убирает @, ссылки, нормализует номера)."""
+    if not contact:
+        return ""
+    
+    c = contact.strip().lower()
+    
+    # Убираем протоколы и www
+    c = c.replace("https://", "").replace("http://", "").replace("www.", "")
+    
+    # Убираем @ и домены для username
+    c = c.replace("@", "").replace("t.me/", "").replace("vk.com/", "").replace("instagram.com/", "")
+    
+    # Для номеров: убираем пробелы, скобки, дефисы
+    c_digits = re.sub(r'[\s\-\(\)\+]', '', c)
+    
+    # Если это номер (только цифры)
+    if c_digits.isdigit():
+        # 8XXXXXXXXXX -> 7XXXXXXXXXX
+        if c_digits.startswith("8") and len(c_digits) == 11:
+            c_digits = "7" + c_digits[1:]
+        # Убираем + если есть
+        if c_digits.startswith("7") and len(c_digits) == 11:
+            return c_digits  # 7XXXXXXXXXX
+        return c_digits
+    
+    # Иначе возвращаем как username (без @ и доменов)
+    return c
+
+
 def extract_contacts_from_text(text: str) -> List[str]:
     """Извлекает контакты из текста: @username, номера телефонов, ссылки."""
     contacts = []
@@ -399,26 +430,43 @@ def extract_contacts_from_text(text: str) -> List[str]:
         return contacts
     
     # @username (Telegram/Instagram)
-    usernames = re.findall(r'@([a-zA-Z0-9_]{5,32})', text)
-    contacts.extend([f"@{u}" for u in usernames])
+    usernames = re.findall(r'@([a-zA-Z0-9_]{3,32})', text)
+    contacts.extend([u for u in usernames])
+    
+    # t.me/username или https://t.me/username
+    tg_links = re.findall(r'(?:https?://)?t\.me/([a-zA-Z0-9_]+)', text, re.IGNORECASE)
+    contacts.extend([u for u in tg_links])
+    
+    # vk.com/id123 или vk.com/username
+    vk_links = re.findall(r'(?:https?://)?vk\.com/([a-zA-Z0-9_]+)', text, re.IGNORECASE)
+    contacts.extend([u for u in vk_links])
+    
+    # instagram.com/username
+    ig_links = re.findall(r'(?:https?://)?(?:www\.)?instagram\.com/([a-zA-Z0-9_.]+)', text, re.IGNORECASE)
+    contacts.extend([u for u in ig_links])
+    
+    # Просто слова без @ (минимум 4 символа, только латиница и _)
+    plain_usernames = re.findall(r'\b([a-zA-Z_][a-zA-Z0-9_]{3,31})\b', text)
+    contacts.extend([u for u in plain_usernames if not u.lower() in ('http', 'https', 'telegram', 'instagram')])
     
     # Телефонные номера (различные форматы)
     phones = re.findall(r'[\+]?[78][\s\-]?[\(]?\d{3}[\)]?[\s\-]?\d{3}[\s\-]?\d{2}[\s\-]?\d{2}', text)
-    contacts.extend([re.sub(r'[\s\-\(\)]', '', p) for p in phones])
+    contacts.extend([p for p in phones])
     
-    # t.me/username
-    tg_links = re.findall(r't\.me/([a-zA-Z0-9_]+)', text, re.IGNORECASE)
-    contacts.extend([f"t.me/{u}" for u in tg_links])
+    # Убираем дубликаты с учётом нормализации
+    unique = {}
+    for c in contacts:
+        normalized = normalize_contact(c)
+        if normalized and normalized not in unique:
+            unique[normalized] = c
     
-    # vk.com/id123 или vk.com/username
-    vk_links = re.findall(r'vk\.com/([a-zA-Z0-9_]+)', text, re.IGNORECASE)
-    contacts.extend([f"vk.com/{u}" for u in vk_links])
-    
-    return list(set(contacts))  # Убираем дубликаты
+    return list(unique.values())
 
 
 def determine_contact_type(contact: str, user_id: int) -> Optional[str]:
     """Определяет тип контакта по выданным пользователю базам."""
+    contact_normalized = normalize_contact(contact)
+    
     # Получаем все контакты, выданные пользователю
     for key, info in BASE_TYPES.items():
         csv_path = info["csv"]
@@ -435,16 +483,11 @@ def determine_contact_type(contact: str, user_id: int) -> Optional[str]:
             if assigned_id and str(assigned_id).strip():
                 try:
                     if int(assigned_id) == user_id:
-                        # Проверяем совпадение с искомым контактом
+                        # Нормализуем и сравниваем
                         value_clean = clean_value(value) or ""
-                        contact_clean = contact.strip().lower()
-                        value_lower = value_clean.lower()
+                        value_normalized = normalize_contact(value_clean)
                         
-                        # Убираем @ и t.me/ для сравнения
-                        value_cmp = value_lower.replace("@", "").replace("t.me/", "")
-                        contact_cmp = contact_clean.replace("@", "").replace("t.me/", "")
-                        
-                        if value_cmp == contact_cmp or value_lower == contact_clean:
+                        if value_normalized == contact_normalized:
                             return key
                 except (ValueError, AttributeError):
                     pass
@@ -454,7 +497,7 @@ def determine_contact_type(contact: str, user_id: int) -> Optional[str]:
 
 def check_lead_duplicate(contact: str) -> Optional[tuple]:
     """Проверяет, существует ли лид в базе. Возвращает (lead_type, user_id, username) если найден."""
-    contact_clean = contact.strip().lower().replace("@", "").replace("t.me/", "")
+    contact_normalized = normalize_contact(contact)
     
     for key, info in LEAD_TYPES.items():
         csv_path = info["csv"]
@@ -467,8 +510,8 @@ def check_lead_duplicate(contact: str) -> Optional[tuple]:
                 continue
             value, user_id_str, username, *_ = row
             
-            value_clean = (value or "").strip().lower().replace("@", "").replace("t.me/", "")
-            if value_clean == contact_clean:
+            value_normalized = normalize_contact(value or "")
+            if value_normalized == contact_normalized:
                 return (key, user_id_str, username)
     
     return None
@@ -2100,6 +2143,7 @@ async def on_report_submit(
         # Обрабатываем каждый контакт
         leads_added = []  # Список добавленных лидов с деталями
         duplicates_found = []
+        unrecognized = []  # Лиды, категорию которых не удалось определить
         
         for contact in all_contacts:
             # Проверяем дубликат
@@ -2125,6 +2169,9 @@ async def on_report_submit(
                         "type": contact_type,
                         "type_name": LEAD_TYPES[contact_type]["name"]
                     })
+            else:
+                # Не удалось определить категорию
+                unrecognized.append(contact)
         
         # Уведомления о дубликатах
         if duplicates_found:
@@ -2161,6 +2208,22 @@ async def on_report_submit(
                         f"📱 @{user.username or 'нет'}"
                     ),
                 )
+        
+        # Уведомление о нераспознанных лидах
+        if unrecognized:
+            await bot.send_message(
+                chat_id=SUPPORT_GROUP_ID,
+                message_thread_id=LEADS_TOPIC_ID,
+                text=(
+                    f"⚠️ Не удалось определить категорию\n\n"
+                    f"Лиды: {', '.join(unrecognized)}\n\n"
+                    f"👤 От: {user.full_name}\n"
+                    f"🆔 ID: {user_id}\n"
+                    f"📱 @{user.username or 'нет'}\n\n"
+                    f"❗️ Эти контакты не найдены в выданных пользователю базах.\n"
+                    f"Добавьте вручную через /add_lead"
+                ),
+            )
         
         await state.clear()
         await message.answer(
