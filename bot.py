@@ -2,8 +2,9 @@ import asyncio
 import csv
 import io
 import os
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import List, Set, Dict, Optional
+from zoneinfo import ZoneInfo
 
 from aiogram import Bot, Dispatcher, F
 from aiogram.filters import CommandStart, Command, StateFilter
@@ -68,6 +69,10 @@ REPORTS_TOPIC_ID = 156
 
 # ID топика «Лиды авто» в чате админов
 LEADS_TOPIC_ID = 769
+
+# Часовой пояс и граница «дня» для лидов (после 20:00 — новый день)
+LEAD_TIMEZONE = "Europe/Moscow"
+LEAD_DAY_CUTOFF_HOUR = 20
 
 # Карта названий листов Excel -> внутренние ключи (для загрузки через админку)
 EXCEL_SHEET_MAP = {
@@ -387,6 +392,28 @@ def ensure_csv_exists() -> None:
 
 LEADS_CSV_HEADER = ["Value", "User_ID", "Username", "Date", "Источник", "Ссылка"]
 
+
+def get_current_lead_day() -> str:
+    """Возвращает дату текущего «дня» для лидов (20:00 — граница, после неё новый день)."""
+    tz = ZoneInfo(LEAD_TIMEZONE)
+    now = datetime.now(tz)
+    if now.hour >= LEAD_DAY_CUTOFF_HOUR:
+        next_day = now.date() + timedelta(days=1)
+        return next_day.strftime("%Y-%m-%d")
+    return now.date().strftime("%Y-%m-%d")
+
+
+def _get_daily_leads_path(lead_type: str, date: str) -> str:
+    """Путь к дневному CSV для категории лидов."""
+    info = LEAD_TYPES.get(lead_type)
+    if not info:
+        return ""
+    base_csv = info["csv"]
+    # leads_telegram.csv -> leads_telegram_2025-01-28.csv
+    base_name = base_csv.removesuffix(".csv")
+    return f"{base_name}_{date}.csv"
+
+
 def ensure_leads_csv_exists() -> None:
     """Проверяет наличие CSV-файлов для лидов. Создаёт пустые, если нет."""
     for key, info in LEAD_TYPES.items():
@@ -637,6 +664,16 @@ def add_lead(contact: str, lead_type: str, user_id: int, username: str, source: 
     rows.append(new_row)
 
     _write_csv(csv_path, rows)
+
+    # Дубликаты проверяются по общей базе; лид также добавляем в базу дня (20:00 — граница дня)
+    daily_path = _get_daily_leads_path(lead_type, get_current_lead_day())
+    if daily_path:
+        if not os.path.exists(daily_path):
+            with open(daily_path, "w", encoding="utf-8", newline="") as f:
+                csv.writer(f).writerow(LEADS_CSV_HEADER)
+        with open(daily_path, "a", encoding="utf-8", newline="") as f:
+            csv.writer(f).writerow(new_row)
+
     return True
 
 
@@ -886,6 +923,36 @@ def _create_leads_excel() -> tuple[io.BytesIO, str]:
     buffer.seek(0)
 
     filename = f"leads_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}.xlsx"
+    return buffer, filename
+
+
+def _create_daily_leads_excel(date: str) -> tuple[io.BytesIO, str]:
+    """Собирает дневные CSV-базы лидов в один Excel. date: YYYY-MM-DD."""
+    wb = Workbook()
+    first = True
+
+    for key, info in LEAD_TYPES.items():
+        daily_path = _get_daily_leads_path(key, date)
+        sheet_name = f"{info['name']} ({date})"
+
+        if first:
+            ws = wb.active
+            ws.title = sheet_name[:31]
+            first = False
+        else:
+            ws = wb.create_sheet(title=sheet_name[:31])
+
+        if daily_path and os.path.exists(daily_path):
+            rows = _read_csv(daily_path)
+            for row in rows:
+                ws.append(row)
+        else:
+            ws.append(LEADS_CSV_HEADER)
+
+    buffer = io.BytesIO()
+    wb.save(buffer)
+    buffer.seek(0)
+    filename = f"leads_day_{date}.xlsx"
     return buffer, filename
 
 
@@ -1420,6 +1487,25 @@ async def on_download_lead(message: Message) -> None:
         await message.answer_document(
             document=document,
             caption="📤 База лидов"
+        )
+    except Exception as e:
+        await message.answer(f"❌ Ошибка при выгрузке: {e}")
+
+
+async def on_download_lead_day(message: Message) -> None:
+    """Выгрузка базы лидов за текущий день (только для топика Лиды авто)."""
+    if message.chat.id != SUPPORT_GROUP_ID or message.message_thread_id != LEADS_TOPIC_ID:
+        return
+
+    today = get_current_lead_day()
+    await message.answer(f"⏳ Собираю лиды за день {today}...")
+
+    try:
+        file_buffer, filename = await asyncio.to_thread(_create_daily_leads_excel, today)
+        document = BufferedInputFile(file_buffer.read(), filename=filename)
+        await message.answer_document(
+            document=document,
+            caption=f"📤 Лиды за {today}"
         )
     except Exception as e:
         await message.answer(f"❌ Ошибка при выгрузке: {e}")
@@ -2366,12 +2452,17 @@ async def on_report_submit(
     user = message.from_user
     if not user:
         return
-    
+
     data = await state.get_data()
     items = data.get("report_items", [])
-    
+    # Сразу очищаем состояние — защита от двойного нажатия (второе нажатие не обработается)
+    await state.clear()
+
     if not items:
-        await message.answer("Сначала пришлите скриншоты, файлы или текст для отчёта.")
+        await message.answer(
+            "Сначала пришлите скриншоты, файлы или текст для отчёта.",
+            reply_markup=get_main_keyboard(),
+        )
         return
     
     user_id = user.id
@@ -2475,7 +2566,12 @@ async def on_report_submit(
             (item.get("content", "") or item.get("caption", "") or "").lower()
             for item in items
         )
+        content_full = " ".join(
+            (item.get("content", "") or item.get("caption", "") or "")
+            for item in items
+        )
         tg_hint = " тг" in content_lower or "тг " in content_lower or " tg" in content_lower or "tg " in content_lower
+        kwork_hint = bool(KWORK_LEAD_KEYWORDS.search(content_full))
         username_str = user.username or ""
         cat_map = data.get("report_contact_categories", {})
 
@@ -2490,7 +2586,12 @@ async def on_report_submit(
             else:
                 contact_type = determine_contact_type(contact, user_id)
                 if not contact_type or contact_type not in LEAD_TYPES:
-                    contact_type = "telegram" if tg_hint else "self"
+                    if tg_hint:
+                        contact_type = "telegram"
+                    elif kwork_hint:
+                        contact_type = "kwork"
+                    else:
+                        contact_type = "self"
             in_base = bool(contact_type) and determine_contact_type(contact, user_id) == contact_type
             src_name = LEAD_TYPES[contact_type]["name"].lower()
             source = "база" if in_base else ("самостоятельный" if contact_type == "self" else f"самостоятельный {src_name}")
@@ -2517,7 +2618,6 @@ async def on_report_submit(
             except Exception as e:
                 print(f"Ошибка добавления лида {contact}: {e}")
 
-        await state.clear()
         await message.answer(
             "✅ Отчёт отправлен!",
             reply_markup=get_main_keyboard(),
@@ -2611,7 +2711,33 @@ async def on_report_category_callback(callback: CallbackQuery, state: FSMContext
 
 
 async def on_report_waiting_category_remind(message: Message, state: FSMContext) -> None:
-    """В режиме выбора категории — напоминание сначала выбрать категорию."""
+    """В режиме выбора категории — сохраняем сообщение в отчёт и напоминаем выбрать категорию."""
+    # Сохраняем контент в report_items, чтобы лид не потерялся
+    content = _extract_text_with_urls(message)
+    if message.photo or message.document or message.video:
+        file_id = None
+        file_type = None
+        caption = content or (message.caption or "").strip()
+        if message.photo:
+            file_id = message.photo[-1].file_id
+            file_type = "photo"
+        elif message.document:
+            file_id = message.document.file_id
+            file_type = "document"
+        elif message.video:
+            file_id = message.video.file_id
+            file_type = "video"
+        if file_id and file_type:
+            data = await state.get_data()
+            items = data.get("report_items", [])
+            items.append({"type": file_type, "file_id": file_id, "caption": caption})
+            await state.update_data(report_items=items)
+    elif content:
+        data = await state.get_data()
+        items = data.get("report_items", [])
+        items.append({"type": "text", "content": content})
+        await state.update_data(report_items=items)
+
     await message.answer("👆 Сначала выберите категорию для текущего лида выше, затем можно загрузить следующий.")
 
 
@@ -2731,11 +2857,17 @@ async def on_user_message_to_support(message: Message, bot: Bot) -> None:
             except Exception as e2:
                 await message.answer(f"❌ Не удалось отправить сообщение: {e2}")
         else:
-            await message.answer(f"❌ Не удалось отправить сообщение: {e}")
-    
+        await message.answer(f"❌ Не удалось отправить сообщение: {e}")
+
     # Любые ссылки в сообщении — добавляем как лиды (даже без режима отчёта)
     content = _extract_text_with_urls(message)
-    if content:
+    # Фото без подписи — подсказка, чтобы лид засчитался
+    if (message.photo or message.document) and not content:
+        await message.answer(
+            "📷 Чтобы лид попал в базу, укажите контакт в подписи к файлу: "
+            "@username, ссылку или номер телефона.",
+        )
+    elif content:
         contacts = extract_contacts_from_text(content)
         if contacts:
             ensure_leads_csv_exists()
@@ -2747,13 +2879,19 @@ async def on_user_message_to_support(message: Message, bot: Bot) -> None:
                 msg_link_raw = f"https://t.me/c/{chat_short}/{topic_id}/{forwarded_msg_id}"
             content_lower = content.lower()
             tg_hint = " тг" in content_lower or "тг " in content_lower or " tg" in content_lower or "tg " in content_lower
+            kwork_hint = bool(KWORK_LEAD_KEYWORDS.search(content))
 
             for contact in contacts:
                 if check_lead_duplicate(contact):
                     continue
                 contact_type = determine_contact_type(contact, user_id)
                 if not contact_type or contact_type not in LEAD_TYPES:
-                    contact_type = "telegram" if tg_hint else "self"
+                    if tg_hint:
+                        contact_type = "telegram"
+                    elif kwork_hint:
+                        contact_type = "kwork"
+                    else:
+                        contact_type = "self"
                 in_base = bool(contact_type) and determine_contact_type(contact, user_id) == contact_type
                 src_name = LEAD_TYPES[contact_type]['name'].lower()
                 source = "база" if in_base else ("самостоятельный" if contact_type == "self" else f"самостоятельный {src_name}")
@@ -3047,6 +3185,7 @@ async def main() -> None:
     dp.message.register(on_stats, Command("stats"))
     dp.message.register(on_leadstats, Command("leadstats"))
     dp.message.register(on_download_lead, Command("download_lead"))
+    dp.message.register(on_download_lead_day, Command("download_lead_day"))
     dp.message.register(on_add_lead_start, Command("add_lead"))
     dp.message.register(on_delete_lead_start, Command("delete_lead"))
     
