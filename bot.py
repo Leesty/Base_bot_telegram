@@ -1688,7 +1688,7 @@ async def on_leadstats(message: Message) -> None:
                 if len(row) >= 4 and row[3]:  # Есть дата добавления
                     try:
                         # Формат: "YYYY.MM.DD HH:MM:SS"
-                        added_date = datetime.strptime(row[3], "%Y.%m.%d %H:%M:%S")
+                        added_date = datetime.strptime(row[3], "%Y.%m.%d %H:%M:%S").replace(tzinfo=timezone.utc)
                         if added_date >= day_ago:
                             day_count += 1
                         if added_date >= week_ago:
