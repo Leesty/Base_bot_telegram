@@ -9,9 +9,12 @@ from aiogram import Bot, Dispatcher, F
 from aiogram.filters import CommandStart, Command, StateFilter
 from aiogram.types import (
     Message,
+    CallbackQuery,
     ReplyKeyboardMarkup,
     ReplyKeyboardRemove,
     KeyboardButton,
+    InlineKeyboardMarkup,
+    InlineKeyboardButton,
     BufferedInputFile,
 )
 from aiogram.fsm.context import FSMContext
@@ -938,7 +941,7 @@ def get_admin_upload_choice_keyboard() -> ReplyKeyboardMarkup:
 
 
 def get_lead_category_keyboard() -> ReplyKeyboardMarkup:
-    """Клавиатура выбора категории для ручного добавления лида."""
+    """Клавиатура выбора категории (Reply — только для личных чатов)."""
     return ReplyKeyboardMarkup(
         keyboard=[
             [
@@ -963,6 +966,31 @@ def get_lead_category_keyboard() -> ReplyKeyboardMarkup:
         ],
         resize_keyboard=True,
     )
+
+
+def get_lead_category_inline_keyboard() -> InlineKeyboardMarkup:
+    """Inline-клавиатура выбора категории (работает в группах)."""
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [
+            InlineKeyboardButton(text="📱 Telegram", callback_data="lead_cat_telegram"),
+            InlineKeyboardButton(text="💬 WhatsApp", callback_data="lead_cat_whatsapp"),
+        ],
+        [
+            InlineKeyboardButton(text="📨 Max", callback_data="lead_cat_max"),
+            InlineKeyboardButton(text="📞 Viber", callback_data="lead_cat_viber"),
+        ],
+        [
+            InlineKeyboardButton(text="📷 Нельзяграм", callback_data="lead_cat_instagram"),
+            InlineKeyboardButton(text="👥 ВКонтакте", callback_data="lead_cat_vk"),
+        ],
+        [
+            InlineKeyboardButton(text="🟠 Одноклассники", callback_data="lead_cat_ok"),
+            InlineKeyboardButton(text="📧 Почта", callback_data="lead_cat_email"),
+        ],
+        [InlineKeyboardButton(text="🟢 Авито", callback_data="lead_cat_avito")],
+        [InlineKeyboardButton(text="🔵 Самостоятельные лиды", callback_data="lead_cat_self")],
+        [InlineKeyboardButton(text="⬅️ Отмена", callback_data="lead_cat_cancel")],
+    ])
 
 
 # ============ МАППИНГ КНОПОК ============
@@ -1497,58 +1525,63 @@ async def on_add_lead_contact(message: Message, state: FSMContext) -> None:
     await message.answer(
         f"Контакт: {contact}\n\n"
         "Выберите категорию для добавления лида:",
-        reply_markup=get_lead_category_keyboard(),
+        reply_markup=get_lead_category_inline_keyboard(),
     )
 
 
-async def on_add_lead_category(message: Message, state: FSMContext, bot: Bot) -> None:
-    """Выбрана категория — добавляем лид."""
-    text = message.text
-    if not text:
+# Маппинг callback_data -> тип лида
+LEAD_CATEGORY_CALLBACK_MAP = {
+    "lead_cat_telegram": "telegram",
+    "lead_cat_whatsapp": "whatsapp",
+    "lead_cat_max": "max",
+    "lead_cat_viber": "viber",
+    "lead_cat_instagram": "instagram",
+    "lead_cat_vk": "vk",
+    "lead_cat_ok": "ok",
+    "lead_cat_email": "email",
+    "lead_cat_avito": "avito",
+    "lead_cat_self": "self",
+}
+
+
+async def on_add_lead_category_callback(callback: CallbackQuery, state: FSMContext, bot: Bot) -> None:
+    """Выбрана категория через inline-кнопку — добавляем лид."""
+    data_text = callback.data
+    if not data_text or data_text == "lead_cat_cancel":
+        await callback.answer("Отменено")
+        await state.clear()
+        await callback.message.edit_text("❌ Добавление лида отменено.")
         return
     
-    # Маппинг кнопок на типы лидов
-    category_map = {
-        "📱 Telegram": "telegram",
-        "💬 WhatsApp": "whatsapp",
-        "📨 Max": "max",
-        "📞 Viber": "viber",
-        "📷 Нельзяграм": "instagram",
-        "👥 ВКонтакте": "vk",
-        "🟠 Одноклассники": "ok",
-        "📧 Почта": "email",
-        "🟢 Авито": "avito",
-        "🔵 Самостоятельные лиды": "self",
-    }
-    
-    lead_type = category_map.get(text)
+    lead_type = LEAD_CATEGORY_CALLBACK_MAP.get(data_text)
     if not lead_type:
-        await message.answer("Неверная категория. Попробуйте ещё раз.")
+        await callback.answer("Неверная категория")
         return
     
     data = await state.get_data()
     contact = data.get("lead_contact", "")
     
     if not contact:
-        await message.answer("Ошибка: контакт не найден.")
+        await callback.answer("Ошибка: контакт не найден.")
         await state.clear()
         return
     
-    user = message.from_user
+    user = callback.from_user
     if not user:
         await state.clear()
         return
+    
+    await callback.answer()
     
     # Проверяем дубликат
     duplicate = check_lead_duplicate(contact)
     if duplicate:
         dup_type, dup_user_id, dup_username = duplicate
-        await message.answer(
+        await callback.message.edit_text(
             f"⚠️ Лид уже существует!\n\n"
             f"📋 Лид: {contact}\n"
             f"📦 Тип: {LEAD_TYPES[dup_type]['name']}\n"
             f"🆔 Добавлен пользователем: {dup_user_id} (@{dup_username})",
-            reply_markup=ReplyKeyboardRemove(remove_keyboard=True),
         )
         await state.clear()
         return
@@ -1557,12 +1590,18 @@ async def on_add_lead_category(message: Message, state: FSMContext, bot: Bot) ->
     success = add_lead(contact, lead_type, user.id, user.username or "admin")
     
     if success:
-        await message.answer(
-            f"✅ Лид добавлен!\n\n"
-            f"📋 Контакт: {contact}\n"
-            f"📦 Категория: {LEAD_TYPES[lead_type]['name']}",
-            reply_markup=ReplyKeyboardRemove(remove_keyboard=True),
-        )
+        try:
+            await callback.message.edit_text(
+                f"✅ Лид добавлен!\n\n"
+                f"📋 Контакт: {contact}\n"
+                f"📦 Категория: {LEAD_TYPES[lead_type]['name']}",
+            )
+        except Exception:
+            await callback.message.answer(
+                f"✅ Лид добавлен!\n\n"
+                f"📋 Контакт: {contact}\n"
+                f"📦 Категория: {LEAD_TYPES[lead_type]['name']}",
+            )
         
         # Уведомление в топик
         await bot.send_message(
@@ -1576,10 +1615,7 @@ async def on_add_lead_category(message: Message, state: FSMContext, bot: Bot) ->
             ),
         )
     else:
-        await message.answer(
-            "❌ Ошибка при добавлении лида.",
-            reply_markup=ReplyKeyboardRemove(remove_keyboard=True),
-        )
+        await callback.message.edit_text("❌ Ошибка при добавлении лида.")
     
     await state.clear()
 
@@ -2252,6 +2288,17 @@ async def on_report_submit(
                 report_url = f"https://t.me/c/{chat_id_short}/{target_topic}/{report_message_id}"
                 report_link = f'\n\n📨 <a href="{report_url}">Открыть отчёт со скринами</a>'
             
+            # Уведомление пользователю о дубликатах
+            dup_list = ", ".join(dup["contact"] for dup in duplicates_found)
+            await bot.send_message(
+                chat_id=user_id,
+                text=(
+                    f"⚠️ Дубликат лида!\n\n"
+                    f"Эти контакты уже есть в базе: {dup_list}\n\n"
+                    f"Они не будут добавлены повторно."
+                ),
+            )
+            
             for dup in duplicates_found:
                 await bot.send_message(
                     chat_id=SUPPORT_GROUP_ID,
@@ -2687,13 +2734,14 @@ async def main() -> None:
         ManualLeadStates.waiting_category,
         F.text == "⬅️ Отмена",
     )
+    dp.callback_query.register(
+        on_add_lead_category_callback,
+        StateFilter(ManualLeadStates.waiting_category),
+        F.data.startswith("lead_cat_"),
+    )
     dp.message.register(
         on_add_lead_contact,
         ManualLeadStates.waiting_contact,
-    )
-    dp.message.register(
-        on_add_lead_category,
-        ManualLeadStates.waiting_category,
     )
     
     # Удаление лида (состояния)
