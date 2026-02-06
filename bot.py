@@ -492,8 +492,8 @@ def extract_contacts_from_text(text: str) -> List[str]:
     tg_links = re.findall(r'(?:https?://)?t\.me/([a-zA-Z0-9_]+)', text, re.IGNORECASE)
     contacts.extend([u for u in tg_links])
     
-    # vk.com/id123, vk.ru/id_123, vk.ru/username — сохраняем vk.ru/username
-    vk_links = re.findall(r'(?:https?://)?(?:www\.)?vk\.(com|ru)/([a-zA-Z0-9_\-]+)', text, re.IGNORECASE)
+    # vk.com/id123, vk.ru/o.kornilova2015 и т.д. — включая точки в username
+    vk_links = re.findall(r'(?:https?://)?(?:www\.)?vk\.(com|ru)/([a-zA-Z0-9_.\-]+)', text, re.IGNORECASE)
     for domain, username in vk_links:
         clean_id = username.split("?")[0].strip()  # убираем query-параметры
         if clean_id:
@@ -584,7 +584,11 @@ def determine_contact_type(contact: str, user_id: int) -> Optional[str]:
     if contact and "instagram.com" in contact.lower():
         return "instagram"
     
-    # Ссылки на VK — если не найдены в базе выдачи, вернём None (будет "самостоятельный")
+    # Ссылки на VK — сразу категория ВКонтакте (как Instagram)
+    if contact and ("vk.com" in contact.lower() or "vk.ru" in contact.lower()):
+        return "vk"
+    
+    # Остальное — проверяем в базах выдачи
     # Проверяем и в базе: возможно выдан пользователю
     contact_normalized = normalize_contact(contact)
     
