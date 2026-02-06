@@ -1505,6 +1505,76 @@ async def on_add_lead_cancel(message: Message, state: FSMContext) -> None:
     )
 
 
+# ============ УДАЛЕНИЕ ЛИДОВ ============
+
+async def on_delete_lead_start(message: Message, state: FSMContext) -> None:
+    """Начало удаления лида (только топик Лиды авто)."""
+    # Только в топике "Лиды авто"
+    if message.chat.id != SUPPORT_GROUP_ID or message.message_thread_id != LEADS_TOPIC_ID:
+        return
+    
+    await state.set_state(DeleteLeadStates.waiting_contact)
+    await message.answer(
+        "🗑 Удаление лида\n\n"
+        "Отправьте контакт лида для удаления: @username, номер телефона или ссылку.",
+        reply_markup=ReplyKeyboardMarkup(
+            keyboard=[[KeyboardButton(text="⬅️ Отмена")]],
+            resize_keyboard=True,
+        ),
+    )
+
+
+async def on_delete_lead_contact(message: Message, state: FSMContext, bot: Bot) -> None:
+    """Получен контакт — удаляем лид."""
+    if not message.text or not message.text.strip():
+        return
+    
+    contact = message.text.strip()
+    user = message.from_user
+    
+    # Удаляем лид
+    result = delete_lead(contact)
+    
+    if result:
+        lead_type, found_value = result
+        await message.answer(
+            f"✅ Лид удалён!\n\n"
+            f"📋 Контакт: {found_value}\n"
+            f"📦 Категория: {LEAD_TYPES[lead_type]['name']}",
+            reply_markup=ReplyKeyboardRemove(remove_keyboard=True),
+        )
+        
+        # Уведомление в топик
+        if user:
+            await bot.send_message(
+                chat_id=SUPPORT_GROUP_ID,
+                message_thread_id=LEADS_TOPIC_ID,
+                text=(
+                    f"🗑 Лид удалён\n\n"
+                    f"📋 Контакт: {found_value}\n"
+                    f"📦 Категория: {LEAD_TYPES[lead_type]['name']}\n"
+                    f"👤 Удалил: {user.full_name} (@{user.username or 'нет'})"
+                ),
+            )
+    else:
+        await message.answer(
+            f"❌ Лид не найден: {contact}\n\n"
+            "Проверьте правильность написания контакта.",
+            reply_markup=ReplyKeyboardRemove(remove_keyboard=True),
+        )
+    
+    await state.clear()
+
+
+async def on_delete_lead_cancel(message: Message, state: FSMContext) -> None:
+    """Отмена удаления лида."""
+    await state.clear()
+    await message.answer(
+        "Отмена удаления лида.",
+        reply_markup=ReplyKeyboardRemove(remove_keyboard=True),
+    )
+
+
 async def on_get_base(message: Message, state: FSMContext) -> None:
     user = message.from_user
     if not user or not is_user_approved(user.id):
