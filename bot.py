@@ -385,7 +385,7 @@ def ensure_csv_exists() -> None:
             print(f"Создан пустой файл: {csv_path}")
 
 
-LEADS_CSV_HEADER = ["Value", "User_ID", "Username", "Date", "Источник"]
+LEADS_CSV_HEADER = ["Value", "User_ID", "Username", "Date", "Источник", "Ссылка"]
 
 def ensure_leads_csv_exists() -> None:
     """Проверяет наличие CSV-файлов для лидов. Создаёт пустые, если нет."""
@@ -616,20 +616,26 @@ def check_lead_duplicate(contact: str) -> Optional[tuple]:
     return None
 
 
-def add_lead(contact: str, lead_type: str, user_id: int, username: str, source: str = "") -> bool:
-    """Добавляет лид в базу. source: '' | 'база' | 'самостоятельный' (для контактов не из базы выдачи)."""
+def add_lead(contact: str, lead_type: str, user_id: int, username: str, source: str = "", message_link: str = "") -> bool:
+    """Добавляет лид в базу. source: '' | 'база' | 'самостоятельный'. message_link: ссылка на сообщение отчёта/поддержки."""
     info = LEAD_TYPES.get(lead_type)
     if not info:
         return False
-    
+
     csv_path = info["csv"]
     rows = _read_csv(csv_path)
-    
-    # Добавляем новую запись
+
+    # Убеждаемся, что у всех строк 6 колонок (для совместимости со старыми файлами)
+    if rows and len(rows[0]) < 6 and rows[0][0] == "Value":
+        rows[0] = LEADS_CSV_HEADER
+    for i in range(1, len(rows)):
+        while len(rows[i]) < 6:
+            rows[i].append("")
+
     now = datetime.now().strftime("%Y.%m.%d %H:%M:%S")
-    new_row = [contact, user_id, username or "нет", now, source or ""]
+    new_row = [contact, user_id, username or "нет", now, source or "", message_link or ""]
     rows.append(new_row)
-    
+
     _write_csv(csv_path, rows)
     return True
 
@@ -2454,11 +2460,12 @@ async def on_report_submit(
             in_base = bool(contact_type) and determine_contact_type(contact, user_id) == contact_type
             src_name = LEAD_TYPES[contact_type]["name"].lower()
             source = "база" if in_base else ("самостоятельный" if contact_type == "self" else f"самостоятельный {src_name}")
+            chat_id_short = str(SUPPORT_GROUP_ID).replace("-100", "")
+            msg_link = f"https://t.me/c/{chat_id_short}/{target_topic}/{report_message_id}" if target_topic else ""
             try:
-                if add_lead(contact, contact_type, user_id, username_str, source=source):
+                if add_lead(contact, contact_type, user_id, username_str, source=source, message_link=msg_link):
                     user_link = f'<a href="tg://user?id={user_id}">{user.full_name}</a>'
-                    chat_id_short = str(SUPPORT_GROUP_ID).replace("-100", "")
-                    report_link = f'\n\n📨 <a href="https://t.me/c/{chat_id_short}/{target_topic}/{report_message_id}">Открыть отчёт</a>' if topic_id else ""
+                    report_link = f'\n\n📨 <a href="{msg_link}">Открыть отчёт</a>' if msg_link else ""
                     await bot.send_message(
                         chat_id=SUPPORT_GROUP_ID,
                         message_thread_id=LEADS_TOPIC_ID,
@@ -2696,10 +2703,10 @@ async def on_user_message_to_support(message: Message, bot: Bot) -> None:
             ensure_leads_csv_exists()
             user_id = user.id
             username = user.username or ""
-            msg_link = ""
-            if forwarded_msg_id:
+            msg_link_raw = ""
+            if forwarded_msg_id and topic_id:
                 chat_short = str(SUPPORT_GROUP_ID).replace("-100", "")
-                msg_link = f'\n\n📨 <a href="https://t.me/c/{chat_short}/{topic_id}/{forwarded_msg_id}">Открыть сообщение</a>'
+                msg_link_raw = f"https://t.me/c/{chat_short}/{topic_id}/{forwarded_msg_id}"
             content_lower = content.lower()
             tg_hint = " тг" in content_lower or "тг " in content_lower or " tg" in content_lower or "tg " in content_lower
 
@@ -2713,7 +2720,8 @@ async def on_user_message_to_support(message: Message, bot: Bot) -> None:
                 src_name = LEAD_TYPES[contact_type]['name'].lower()
                 source = "база" if in_base else ("самостоятельный" if contact_type == "self" else f"самостоятельный {src_name}")
                 try:
-                    if add_lead(contact, contact_type, user_id, username, source=source):
+                    if add_lead(contact, contact_type, user_id, username, source=source, message_link=msg_link_raw):
+                        msg_link_html = f'\n\n📨 <a href="{msg_link_raw}">Открыть сообщение</a>' if msg_link_raw else ""
                         await bot.send_message(
                             chat_id=SUPPORT_GROUP_ID,
                             message_thread_id=LEADS_TOPIC_ID,
@@ -2722,7 +2730,7 @@ async def on_user_message_to_support(message: Message, bot: Bot) -> None:
                                 f"📋 Контакт: {contact}\n"
                                 f"📦 Категория: {LEAD_TYPES[contact_type]['name']}\n"
                                 f"👤 От: {user.full_name} (@{username or 'нет'})"
-                                f"{msg_link}"
+                                f"{msg_link_html}"
                             ),
                             parse_mode="HTML",
                         )
