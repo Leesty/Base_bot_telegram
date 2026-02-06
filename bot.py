@@ -120,6 +120,7 @@ LEAD_TYPES = {
     "email": {"name": "Почта", "csv": "leads_email.csv"},
     "avito": {"name": "Авито", "csv": "leads_avito.csv"},
     "yula": {"name": "Юла", "csv": "leads_yula.csv"},
+    "kwork": {"name": "Кворк", "csv": "leads_kwork.csv"},
     "self": {"name": "Самостоятельные лиды", "csv": "leads_self.csv"},
 }
 
@@ -439,6 +440,9 @@ SELF_LEAD_KEYWORDS = re.compile(r'\b(сам|сама|самостоятельн�
 # Ключевые слова: если есть в тексте рядом с лидом — категория "Юла"
 YULA_LEAD_KEYWORDS = re.compile(r'\bюла\b', re.IGNORECASE)
 
+# Ключевые слова: если есть в тексте рядом с лидом — категория "Кворк"
+KWORK_LEAD_KEYWORDS = re.compile(r'\bкворк\b', re.IGNORECASE)
+
 
 def extract_contacts_from_text(text: str) -> List[str]:
     """Извлекает контакты из текста: @username, номера телефонов, ссылки."""
@@ -454,9 +458,10 @@ def extract_contacts_from_text(text: str) -> List[str]:
     tg_links = re.findall(r'(?:https?://)?t\.me/([a-zA-Z0-9_]+)', text, re.IGNORECASE)
     contacts.extend([u for u in tg_links])
     
-    # vk.com/id123 или vk.ru/username
-    vk_links = re.findall(r'(?:https?://)?vk\.(?:com|ru)/([a-zA-Z0-9_]+)', text, re.IGNORECASE)
-    contacts.extend([u for u in vk_links])
+    # vk.com/id123 или vk.ru/username — сохраняем vk.ru/username для однозначности
+    vk_links = re.findall(r'(?:https?://)?vk\.(com|ru)/([a-zA-Z0-9_]+)', text, re.IGNORECASE)
+    for domain, username in vk_links:
+        contacts.append(f"vk.{domain.lower()}/{username}")
     
     # avito.ru/... (объявления, бренды и т.д.)
     avito_links = re.findall(r'(?:https?://)?(?:www\.)?avito\.ru/([a-zA-Z0-9_/\-]+)', text, re.IGNORECASE)
@@ -487,6 +492,22 @@ def extract_contacts_from_text(text: str) -> List[str]:
     phones = re.findall(r'[\+]?[78][\s\-]?[\(]?\d{3}[\)]?[\s\-]?\d{3}[\s\-]?\d{2}[\s\-]?\d{2}', text)
     contacts.extend([p for p in phones])
     
+    # kwork.ru/username или youdo.com (Кворк)
+    kwork_links = re.findall(r'(?:https?://)?(?:www\.)?kwork\.ru/([a-zA-Z0-9_\-]+)', text, re.IGNORECASE)
+    for u in kwork_links:
+        contacts.append(f"kwork.ru/{u.split('?')[0]}")
+    
+    # Если в тексте есть "кворк" — извлекаем также plain username/ID (ElenaTuz и т.д.)
+    if KWORK_LEAD_KEYWORDS.search(text):
+        words = text.split()
+        for word in words:
+            clean_word = re.sub(r'[^\w]', '', word)
+            if re.match(r'^[a-zA-Z0-9_]{4,32}$', clean_word):
+                cw_lower = clean_word.lower()
+                if cw_lower not in {'https', 'http', 'kwork', 'кворк'}:
+                    if not any(x in cw_lower for x in ('http', 'www', 'tme', 'vkru', 'avitoru')):
+                        contacts.append(clean_word)
+    
     # Только ссылки, @username и номера — любые другие слова игнорируются
     
     # Убираем дубликаты с учётом нормализации
@@ -509,6 +530,12 @@ def determine_contact_type(contact: str, user_id: int) -> Optional[str]:
     if contact and ("mail.ru" in contact.lower() or "youla.ru" in contact.lower()):
         return "yula"
     
+    # Ссылки на Кворк (kwork.ru)
+    if contact and "kwork.ru" in contact.lower():
+        return "kwork"
+    
+    # Ссылки на VK — если не найдены в базе выдачи, вернём None (будет "самостоятельный")
+    # Проверяем и в базе: возможно выдан пользователю
     contact_normalized = normalize_contact(contact)
     
     # Сначала проверяем выданные конкретному пользователю
@@ -1008,6 +1035,7 @@ def get_lead_category_inline_keyboard() -> InlineKeyboardMarkup:
             InlineKeyboardButton(text="🟢 Авито", callback_data="lead_cat_avito"),
             InlineKeyboardButton(text="🟡 Юла", callback_data="lead_cat_yula"),
         ],
+        [InlineKeyboardButton(text="🟣 Кворк", callback_data="lead_cat_kwork")],
         [InlineKeyboardButton(text="🔵 Самостоятельные лиды", callback_data="lead_cat_self")],
         [InlineKeyboardButton(text="⬅️ Отмена", callback_data="lead_cat_cancel")],
     ])
@@ -1561,6 +1589,7 @@ LEAD_CATEGORY_CALLBACK_MAP = {
     "lead_cat_email": "email",
     "lead_cat_avito": "avito",
     "lead_cat_yula": "yula",
+    "lead_cat_kwork": "kwork",
     "lead_cat_self": "self",
 }
 
@@ -2253,6 +2282,7 @@ async def on_report_submit(
                 )
         
         # ============ ОБРАБОТКА ЛИДОВ ============
+        ensure_leads_csv_exists()  # Гарантируем наличие файлов лидов
         # Извлекаем контакты с источником (contact, source_text)
         all_contacts_with_source = []  # [(contact, source_text), ...]
         for item in items:
@@ -2294,19 +2324,26 @@ async def on_report_submit(
                 continue
             
             # Определяем тип контакта
-            # Ключевые слова в тексте: "сам"/"самостоятельно" -> Самостоятельные; "юла" -> Юла
+            # Ключевые слова: "сам"/"самостоятельно" -> Самостоятельные; "юла" -> Юла; "кворк" -> Кворк
             if SELF_LEAD_KEYWORDS.search(source_text):
                 contact_type = "self"
             elif YULA_LEAD_KEYWORDS.search(source_text):
                 contact_type = "yula"
+            elif KWORK_LEAD_KEYWORDS.search(source_text):
+                contact_type = "kwork"
             else:
                 contact_type = determine_contact_type(contact, user_id)
-                # Если не нашли в базе контактов — добавляем как "Самостоятельный лид"
-                if not contact_type:
-                    contact_type = "self"
             
-            # Добавляем лид
-            success = add_lead(contact, contact_type, user_id, user.username or "")
+            # Любой лид, не найденный в базе выдачи — всегда в "Самостоятельные лиды"
+            if not contact_type or contact_type not in LEAD_TYPES:
+                contact_type = "self"
+            
+            # Добавляем лид (всегда добавляем, если не дубликат — в т.ч. как самостоятельный)
+            try:
+                success = add_lead(contact, contact_type, user_id, user.username or "")
+            except Exception as e:
+                print(f"Ошибка добавления лида {contact}: {e}")
+                success = False
             if success:
                 leads_added.append({
                     "contact": contact,
