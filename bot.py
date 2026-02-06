@@ -541,7 +541,7 @@ def get_main_keyboard() -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(
         keyboard=[
             [KeyboardButton(text="📦 Получить списки контактов")],
-            [KeyboardButton(text="📋 Сдать отчёт")],
+            [KeyboardButton(text="📋 Отчёт по лидам")],
             [KeyboardButton(text="💬 Написать в поддержку")],
         ],
         resize_keyboard=True,
@@ -1165,7 +1165,7 @@ async def on_user_base_choice(message: Message, state: FSMContext, bot: Bot) -> 
     
     # Подсказка и переход в главное меню
     await message.answer(
-        "Когда выполните работу, нажмите на кнопку «Сдать отчёт».",
+        "Когда выполните работу, нажмите «Отчёт по лидам» и пришлите скриншот + ссылку на лида.",
         reply_markup=get_main_keyboard(),
     )
     
@@ -1432,15 +1432,18 @@ async def on_admin_delete_cancel(message: Message, state: FSMContext) -> None:
 async def on_support_info(message: Message) -> None:
     """Пользователь нажал 'Написать в поддержку' — показываем информацию."""
     await message.answer(
-        "💬 Чтобы связаться с поддержкой, просто напиши любое сообщение в этот чат.\n\n"
-        "Твоё сообщение будет отправлено менеджеру, и он ответит тебе здесь."
+        "💬 Всё общение — через поддержку!\n\n"
+        "Просто напиши любое сообщение в бота — оно уйдёт менеджеру, "
+        "и он ответит тебе здесь.\n\n"
+        "Возникли вопросы? Появился лид? Нужно добавить лимиты на выдачу? "
+        "Пиши прямо в бота"
     )
 
 
 # ============ ОТЧЁТЫ ============
 
 async def on_report_start(message: Message, state: FSMContext) -> None:
-    """Пользователь нажал 'Сдать отчёт' — начинаем сбор файлов."""
+    """Пользователь нажал 'Отчёт по лидам' — начинаем сбор файлов."""
     user = message.from_user
     if not user or not is_user_approved(user.id):
         await message.answer("❌ У вас нет доступа к этой функции.")
@@ -1449,8 +1452,11 @@ async def on_report_start(message: Message, state: FSMContext) -> None:
     await state.set_state(ReportStates.waiting_report)
     await state.update_data(report_items=[])
     await message.answer(
-        "Пришлите скриншоты, файлы или текстовые сообщения для отчёта.\n\n"
-        "Когда всё загрузите, нажмите «Отправить отчёт».",
+        "📋 Отчёт по лиду\n\n"
+        "Один лид — один скриншот + подпись с контактом лида\n\n"
+        "Скинь скриншот переписки или результата. Под каждым укажи: "
+        "@username, номер телефона или ссылку на соцсеть.\n\n"
+        "Готово? Жми «Отправить отчёт» 👇",
         reply_markup=get_report_keyboard(),
     )
 
@@ -1468,6 +1474,7 @@ async def on_report_file(
     
     file_id = None
     file_type = None
+    caption = (message.caption or "").strip()
     if message.photo:
         file_id = message.photo[-1].file_id
         file_type = "photo"
@@ -1479,7 +1486,7 @@ async def on_report_file(
         file_type = "video"
     
     if file_id and file_type:
-        items.append({"type": file_type, "file_id": file_id})
+        items.append({"type": file_type, "file_id": file_id, "caption": caption})
         await state.update_data(report_items=items)
         await message.answer(f"✅ Добавлено. Нажмите «Отправить отчёт», когда всё загрузите.")
 
@@ -1512,7 +1519,7 @@ async def on_report_submit(
             chat_id=SUPPORT_GROUP_ID,
             message_thread_id=REPORTS_TOPIC_ID,
             text=(
-                f"📋 Новый отчёт!\n\n"
+                f"📋 Новый отчёт по лидам!\n\n"
                 f"👤 {user.full_name}\n"
                 f"🆔 ID: {user_id}\n"
                 f"📱 @{user.username or 'нет'}\n\n"
@@ -1535,22 +1542,28 @@ async def on_report_submit(
                     text=f"💬 {item['content']}",
                 )
             elif ft == "photo":
+                cap = item.get("caption") or None
                 await bot.send_photo(
                     chat_id=SUPPORT_GROUP_ID,
                     message_thread_id=target_topic,
                     photo=item["file_id"],
+                    caption=cap,
                 )
             elif ft == "document":
+                cap = item.get("caption") or None
                 await bot.send_document(
                     chat_id=SUPPORT_GROUP_ID,
                     message_thread_id=target_topic,
                     document=item["file_id"],
+                    caption=cap,
                 )
             elif ft == "video":
+                cap = item.get("caption") or None
                 await bot.send_video(
                     chat_id=SUPPORT_GROUP_ID,
                     message_thread_id=target_topic,
                     video=item["file_id"],
+                    caption=cap,
                 )
         
         await state.clear()
@@ -2001,7 +2014,7 @@ async def main() -> None:
 
     # Пользователь: навигация
     dp.message.register(on_get_base, F.text == "📦 Получить списки контактов")
-    dp.message.register(on_report_start, F.text == "📋 Сдать отчёт")
+    dp.message.register(on_report_start, F.text == "📋 Отчёт по лидам")
     dp.message.register(on_support_info, F.text == "💬 Написать в поддержку")
     dp.message.register(on_back, F.text == "⬅️ Назад")
 
