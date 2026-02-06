@@ -2857,7 +2857,7 @@ async def on_user_message_to_support(message: Message, bot: Bot) -> None:
             except Exception as e2:
                 await message.answer(f"❌ Не удалось отправить сообщение: {e2}")
         else:
-        await message.answer(f"❌ Не удалось отправить сообщение: {e}")
+            await message.answer(f"❌ Не удалось отправить сообщение: {e}")
 
     # Любые ссылки в сообщении — добавляем как лиды (даже без режима отчёта)
     content = _extract_text_with_urls(message)
