@@ -63,6 +63,9 @@ REQUESTS_TOPIC_ID = None  # Будет создан автоматически
 # ID топика «Отчёт» в чате админов
 REPORTS_TOPIC_ID = 156
 
+# ID топика «Лиды авто» в чате админов
+LEADS_TOPIC_ID = 769
+
 # Карта названий листов Excel -> внутренние ключи (для загрузки через админку)
 EXCEL_SHEET_MAP = {
     # Короткие названия
@@ -102,6 +105,18 @@ EXCEL_SHEET_MAP = {
     "Почты": "email",
 }
 
+# Типы лидов (структура для хранения)
+LEAD_TYPES = {
+    "telegram": {"name": "Telegram", "csv": "leads_telegram.csv"},
+    "whatsapp": {"name": "WhatsApp", "csv": "leads_whatsapp.csv"},
+    "max": {"name": "Max", "csv": "leads_max.csv"},
+    "viber": {"name": "Viber", "csv": "leads_viber.csv"},
+    "instagram": {"name": "Нельзяграм", "csv": "leads_instagram.csv"},
+    "vk": {"name": "ВКонтакте", "csv": "leads_vk.csv"},
+    "ok": {"name": "Одноклассники", "csv": "leads_ok.csv"},
+    "email": {"name": "Почта", "csv": "leads_email.csv"},
+}
+
 # ============ НАЧАЛЬНАЯ ЗАГРУЗКА (ОТКЛЮЧЕНА) ============
 # Раскомментируй для автозагрузки из файла при первом запуске:
 # INITIAL_EXCEL_PATH = "Новая таблица.xlsx"
@@ -118,6 +133,15 @@ class AdminStates(StatesGroup):
 
 class ReportStates(StatesGroup):
     waiting_report = State()  # Сбор файлов отчёта
+
+
+class ManualLeadStates(StatesGroup):
+    waiting_contact = State()  # Ожидание контакта лида
+    waiting_category = State()  # Ожидание выбора категории
+
+
+class DeleteLeadStates(StatesGroup):
+    waiting_contact = State()  # Ожидание контакта для удаления
 
 
 # ============ ГЛОБАЛЬНЫЕ ПЕРЕМЕННЫЕ ============
@@ -353,6 +377,157 @@ def ensure_csv_exists() -> None:
             print(f"Создан пустой файл: {csv_path}")
 
 
+def ensure_leads_csv_exists() -> None:
+    """Проверяет наличие CSV-файлов для лидов. Создаёт пустые, если нет."""
+    for key, info in LEAD_TYPES.items():
+        csv_path = info["csv"]
+        if not os.path.exists(csv_path):
+            with open(csv_path, "w", encoding="utf-8", newline="") as f:
+                writer = csv.writer(f)
+                writer.writerow(["Value", "User_ID", "Username", "Date"])
+            print(f"Создан пустой файл лидов: {csv_path}")
+
+
+# ============ РАБОТА С ЛИДАМИ ============
+
+import re
+
+def extract_contacts_from_text(text: str) -> List[str]:
+    """Извлекает контакты из текста: @username, номера телефонов, ссылки."""
+    contacts = []
+    if not text:
+        return contacts
+    
+    # @username (Telegram/Instagram)
+    usernames = re.findall(r'@([a-zA-Z0-9_]{5,32})', text)
+    contacts.extend([f"@{u}" for u in usernames])
+    
+    # Телефонные номера (различные форматы)
+    phones = re.findall(r'[\+]?[78][\s\-]?[\(]?\d{3}[\)]?[\s\-]?\d{3}[\s\-]?\d{2}[\s\-]?\d{2}', text)
+    contacts.extend([re.sub(r'[\s\-\(\)]', '', p) for p in phones])
+    
+    # t.me/username
+    tg_links = re.findall(r't\.me/([a-zA-Z0-9_]+)', text, re.IGNORECASE)
+    contacts.extend([f"t.me/{u}" for u in tg_links])
+    
+    # vk.com/id123 или vk.com/username
+    vk_links = re.findall(r'vk\.com/([a-zA-Z0-9_]+)', text, re.IGNORECASE)
+    contacts.extend([f"vk.com/{u}" for u in vk_links])
+    
+    return list(set(contacts))  # Убираем дубликаты
+
+
+def determine_contact_type(contact: str, user_id: int) -> Optional[str]:
+    """Определяет тип контакта по выданным пользователю базам."""
+    # Получаем все контакты, выданные пользователю
+    for key, info in BASE_TYPES.items():
+        csv_path = info["csv"]
+        if not os.path.exists(csv_path):
+            continue
+        
+        rows = _read_csv(csv_path)
+        for row in rows[1:]:  # Пропускаем заголовок
+            if len(row) < 4:
+                continue
+            value, assigned_id, *_ = row
+            
+            # Проверяем, выдан ли этот контакт пользователю
+            if assigned_id and str(assigned_id).strip():
+                try:
+                    if int(assigned_id) == user_id:
+                        # Проверяем совпадение с искомым контактом
+                        value_clean = clean_value(value) or ""
+                        contact_clean = contact.strip().lower()
+                        value_lower = value_clean.lower()
+                        
+                        # Убираем @ и t.me/ для сравнения
+                        value_cmp = value_lower.replace("@", "").replace("t.me/", "")
+                        contact_cmp = contact_clean.replace("@", "").replace("t.me/", "")
+                        
+                        if value_cmp == contact_cmp or value_lower == contact_clean:
+                            return key
+                except (ValueError, AttributeError):
+                    pass
+    
+    return None
+
+
+def check_lead_duplicate(contact: str) -> Optional[tuple]:
+    """Проверяет, существует ли лид в базе. Возвращает (lead_type, user_id, username) если найден."""
+    contact_clean = contact.strip().lower().replace("@", "").replace("t.me/", "")
+    
+    for key, info in LEAD_TYPES.items():
+        csv_path = info["csv"]
+        if not os.path.exists(csv_path):
+            continue
+        
+        rows = _read_csv(csv_path)
+        for row in rows[1:]:
+            if len(row) < 4:
+                continue
+            value, user_id_str, username, *_ = row
+            
+            value_clean = (value or "").strip().lower().replace("@", "").replace("t.me/", "")
+            if value_clean == contact_clean:
+                return (key, user_id_str, username)
+    
+    return None
+
+
+def add_lead(contact: str, lead_type: str, user_id: int, username: str) -> bool:
+    """Добавляет лид в базу. Возвращает True если успешно."""
+    info = LEAD_TYPES.get(lead_type)
+    if not info:
+        return False
+    
+    csv_path = info["csv"]
+    rows = _read_csv(csv_path)
+    
+    # Добавляем новую запись
+    now = datetime.now().strftime("%Y.%m.%d %H:%M:%S")
+    new_row = [contact, user_id, username or "нет", now]
+    rows.append(new_row)
+    
+    _write_csv(csv_path, rows)
+    return True
+
+
+def delete_lead(contact: str) -> Optional[tuple]:
+    """Удаляет лид из базы. Возвращает (lead_type, contact) если успешно, None если не найден."""
+    contact_clean = contact.strip().lower().replace("@", "").replace("t.me/", "")
+    
+    for key, info in LEAD_TYPES.items():
+        csv_path = info["csv"]
+        if not os.path.exists(csv_path):
+            continue
+        
+        rows = _read_csv(csv_path)
+        new_rows = [rows[0]]  # Заголовок
+        found = False
+        found_value = None
+        
+        for row in rows[1:]:
+            if len(row) < 4:
+                new_rows.append(row)
+                continue
+            
+            value = row[0] or ""
+            value_clean = value.strip().lower().replace("@", "").replace("t.me/", "")
+            
+            if value_clean == contact_clean:
+                found = True
+                found_value = value
+                # Пропускаем эту строку (удаляем)
+            else:
+                new_rows.append(row)
+        
+        if found:
+            _write_csv(csv_path, new_rows)
+            return (key, found_value)
+    
+    return None
+
+
 # ============ РАБОТА С CSV ============
 
 def _read_csv(path: str) -> List[List[str]]:
@@ -535,6 +710,37 @@ def _create_full_excel() -> tuple[io.BytesIO, str]:
     return buffer, filename
 
 
+def _create_leads_excel() -> tuple[io.BytesIO, str]:
+    """Собирает все CSV-базы лидов в один Excel-файл."""
+    wb = Workbook()
+    first = True
+
+    for key, info in LEAD_TYPES.items():
+        csv_path = info["csv"]
+        sheet_name = info["name"]
+
+        if first:
+            ws = wb.active
+            ws.title = sheet_name
+            first = False
+        else:
+            ws = wb.create_sheet(title=sheet_name)
+
+        if os.path.exists(csv_path):
+            rows = _read_csv(csv_path)
+            for row in rows:
+                ws.append(row)
+        else:
+            ws.append(["Value", "User_ID", "Username", "Date"])
+
+    buffer = io.BytesIO()
+    wb.save(buffer)
+    buffer.seek(0)
+
+    filename = f"leads_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}.xlsx"
+    return buffer, filename
+
+
 # ============ КЛАВИАТУРЫ ============
 
 def get_main_keyboard() -> ReplyKeyboardMarkup:
@@ -641,6 +847,32 @@ def get_admin_upload_choice_keyboard() -> ReplyKeyboardMarkup:
                 KeyboardButton(text="📧 Загрузить Почта"),
             ],
             [KeyboardButton(text="📚 Загрузить ВСЕ листы из файла")],
+            [KeyboardButton(text="⬅️ Отмена")],
+        ],
+        resize_keyboard=True,
+    )
+
+
+def get_lead_category_keyboard() -> ReplyKeyboardMarkup:
+    """Клавиатура выбора категории для ручного добавления лида."""
+    return ReplyKeyboardMarkup(
+        keyboard=[
+            [
+                KeyboardButton(text="📱 Telegram"),
+                KeyboardButton(text="💬 WhatsApp"),
+            ],
+            [
+                KeyboardButton(text="📨 Max"),
+                KeyboardButton(text="📞 Viber"),
+            ],
+            [
+                KeyboardButton(text="📷 Нельзяграм"),
+                KeyboardButton(text="👥 ВКонтакте"),
+            ],
+            [
+                KeyboardButton(text="🟠 Одноклассники"),
+                KeyboardButton(text="📧 Почта"),
+            ],
             [KeyboardButton(text="⬅️ Отмена")],
         ],
         resize_keyboard=True,
@@ -963,6 +1195,25 @@ async def on_download_db(message: Message) -> None:
         await message.answer(f"❌ Ошибка при выгрузке: {e}")
 
 
+async def on_download_lead(message: Message) -> None:
+    """Выгрузка базы лидов (только для топика Лиды авто)."""
+    # Только в топике "Лиды авто"
+    if message.chat.id != SUPPORT_GROUP_ID or message.message_thread_id != LEADS_TOPIC_ID:
+        return
+    
+    await message.answer("⏳ Собираю базу лидов...")
+    
+    try:
+        file_buffer, filename = await asyncio.to_thread(_create_leads_excel)
+        document = BufferedInputFile(file_buffer.read(), filename=filename)
+        await message.answer_document(
+            document=document,
+            caption="📤 База лидов"
+        )
+    except Exception as e:
+        await message.answer(f"❌ Ошибка при выгрузке: {e}")
+
+
 async def on_stats(message: Message) -> None:
     """Статистика свободных контактов и выданных за периоды (только для группы админов)."""
     # Только в группе поддержки
@@ -1053,6 +1304,205 @@ async def on_stats(message: Message) -> None:
     lines.append("```")
     
     await message.answer("\n".join(lines), parse_mode="Markdown")
+
+
+async def on_leadstats(message: Message) -> None:
+    """Статистика по лидам (только для топика Лиды авто)."""
+    # Только в топике "Лиды авто"
+    if message.chat.id != SUPPORT_GROUP_ID or message.message_thread_id != LEADS_TOPIC_ID:
+        return
+    
+    def _count_lead_stats() -> tuple:
+        from datetime import timedelta
+        
+        now = datetime.utcnow()
+        day_ago = now - timedelta(days=1)
+        week_ago = now - timedelta(days=7)
+        month_ago = now - timedelta(days=30)
+        
+        lead_stats = []  # (name, total, day, week, month)
+        
+        for key, info in LEAD_TYPES.items():
+            csv_path = info["csv"]
+            rows = _read_csv(csv_path)
+            total = len(rows) - 1  # Минус заголовок
+            
+            # Считаем добавленные за периоды
+            day_count = 0
+            week_count = 0
+            month_count = 0
+            
+            for row in rows[1:]:
+                if len(row) >= 4 and row[3]:  # Есть дата добавления
+                    try:
+                        # Формат: "YYYY.MM.DD HH:MM:SS"
+                        added_date = datetime.strptime(row[3], "%Y.%m.%d %H:%M:%S")
+                        if added_date >= day_ago:
+                            day_count += 1
+                        if added_date >= week_ago:
+                            week_count += 1
+                        if added_date >= month_ago:
+                            month_count += 1
+                    except ValueError:
+                        pass
+            
+            lead_stats.append((info["name"], total, day_count, week_count, month_count))
+        
+        return lead_stats
+    
+    lead_stats = await asyncio.to_thread(_count_lead_stats)
+    
+    # Формируем статистику
+    lines = ["📊 **Статистика лидов:**\n"]
+    lines.append("```")
+    lines.append(f"{'Тип':<25} {'Всего':>7} {'Сутки':>7} {'Неделя':>7} {'Месяц':>7}")
+    lines.append("-" * 59)
+    
+    total_all = 0
+    total_day = 0
+    total_week = 0
+    total_month = 0
+    
+    for name, total, day, week, month in lead_stats:
+        # Обрезаем длинные названия
+        short_name = name[:24] if len(name) > 24 else name
+        lines.append(f"{short_name:<25} {total:>7} {day:>7} {week:>7} {month:>7}")
+        total_all += total
+        total_day += day
+        total_week += week
+        total_month += month
+    
+    lines.append("-" * 59)
+    lines.append(f"{'ИТОГО':<25} {total_all:>7} {total_day:>7} {total_week:>7} {total_month:>7}")
+    lines.append("```")
+    
+    await message.answer("\n".join(lines), parse_mode="Markdown")
+
+
+# ============ РУЧНОЕ ДОБАВЛЕНИЕ ЛИДОВ ============
+
+async def on_add_lead_start(message: Message, state: FSMContext) -> None:
+    """Начало ручного добавления лида (только топик Лиды авто)."""
+    # Только в топике "Лиды авто"
+    if message.chat.id != SUPPORT_GROUP_ID or message.message_thread_id != LEADS_TOPIC_ID:
+        return
+    
+    await state.set_state(ManualLeadStates.waiting_contact)
+    await message.answer(
+        "📝 Добавление лида вручную\n\n"
+        "Отправьте контакт лида: @username, номер телефона или ссылку.",
+        reply_markup=ReplyKeyboardMarkup(
+            keyboard=[[KeyboardButton(text="⬅️ Отмена")]],
+            resize_keyboard=True,
+        ),
+    )
+
+
+async def on_add_lead_contact(message: Message, state: FSMContext) -> None:
+    """Получен контакт — запрашиваем категорию."""
+    if not message.text or not message.text.strip():
+        return
+    
+    # Сохраняем контакт в FSM
+    contact = message.text.strip()
+    await state.update_data(lead_contact=contact)
+    await state.set_state(ManualLeadStates.waiting_category)
+    
+    await message.answer(
+        f"Контакт: {contact}\n\n"
+        "Выберите категорию для добавления лида:",
+        reply_markup=get_lead_category_keyboard(),
+    )
+
+
+async def on_add_lead_category(message: Message, state: FSMContext, bot: Bot) -> None:
+    """Выбрана категория — добавляем лид."""
+    text = message.text
+    if not text:
+        return
+    
+    # Маппинг кнопок на типы лидов
+    category_map = {
+        "📱 Telegram": "telegram",
+        "💬 WhatsApp": "whatsapp",
+        "📨 Max": "max",
+        "📞 Viber": "viber",
+        "📷 Нельзяграм": "instagram",
+        "👥 ВКонтакте": "vk",
+        "🟠 Одноклассники": "ok",
+        "📧 Почта": "email",
+    }
+    
+    lead_type = category_map.get(text)
+    if not lead_type:
+        await message.answer("Неверная категория. Попробуйте ещё раз.")
+        return
+    
+    data = await state.get_data()
+    contact = data.get("lead_contact", "")
+    
+    if not contact:
+        await message.answer("Ошибка: контакт не найден.")
+        await state.clear()
+        return
+    
+    user = message.from_user
+    if not user:
+        await state.clear()
+        return
+    
+    # Проверяем дубликат
+    duplicate = check_lead_duplicate(contact)
+    if duplicate:
+        dup_type, dup_user_id, dup_username = duplicate
+        await message.answer(
+            f"⚠️ Лид уже существует!\n\n"
+            f"📋 Лид: {contact}\n"
+            f"📦 Тип: {LEAD_TYPES[dup_type]['name']}\n"
+            f"🆔 Добавлен пользователем: {dup_user_id} (@{dup_username})",
+            reply_markup=ReplyKeyboardRemove(remove_keyboard=True),
+        )
+        await state.clear()
+        return
+    
+    # Добавляем лид
+    success = add_lead(contact, lead_type, user.id, user.username or "admin")
+    
+    if success:
+        await message.answer(
+            f"✅ Лид добавлен!\n\n"
+            f"📋 Контакт: {contact}\n"
+            f"📦 Категория: {LEAD_TYPES[lead_type]['name']}",
+            reply_markup=ReplyKeyboardRemove(remove_keyboard=True),
+        )
+        
+        # Уведомление в топик
+        await bot.send_message(
+            chat_id=SUPPORT_GROUP_ID,
+            message_thread_id=LEADS_TOPIC_ID,
+            text=(
+                f"➕ Лид добавлен вручную\n\n"
+                f"📋 Контакт: {contact}\n"
+                f"📦 Категория: {LEAD_TYPES[lead_type]['name']}\n"
+                f"👤 Добавил: {user.full_name} (@{user.username or 'нет'})"
+            ),
+        )
+    else:
+        await message.answer(
+            "❌ Ошибка при добавлении лида.",
+            reply_markup=ReplyKeyboardRemove(remove_keyboard=True),
+        )
+    
+    await state.clear()
+
+
+async def on_add_lead_cancel(message: Message, state: FSMContext) -> None:
+    """Отмена добавления лида."""
+    await state.clear()
+    await message.answer(
+        "Отмена добавления лида.",
+        reply_markup=ReplyKeyboardRemove(remove_keyboard=True),
+    )
 
 
 async def on_get_base(message: Message, state: FSMContext) -> None:
@@ -1566,6 +2016,82 @@ async def on_report_submit(
                     caption=cap,
                 )
         
+        # ============ ОБРАБОТКА ЛИДОВ ============
+        # Извлекаем все контакты из отчёта
+        all_contacts = []
+        for item in items:
+            if item["type"] == "text":
+                all_contacts.extend(extract_contacts_from_text(item["content"]))
+            elif item["type"] in ("photo", "document", "video"):
+                caption = item.get("caption", "")
+                if caption:
+                    all_contacts.extend(extract_contacts_from_text(caption))
+        
+        # Обрабатываем каждый контакт
+        leads_added = []  # Список добавленных лидов с деталями
+        duplicates_found = []
+        
+        for contact in all_contacts:
+            # Проверяем дубликат
+            duplicate = check_lead_duplicate(contact)
+            if duplicate:
+                dup_type, dup_user_id, dup_username = duplicate
+                duplicates_found.append({
+                    "contact": contact,
+                    "type": LEAD_TYPES[dup_type]["name"],
+                    "original_user_id": dup_user_id,
+                    "original_username": dup_username
+                })
+                continue
+            
+            # Определяем тип контакта
+            contact_type = determine_contact_type(contact, user_id)
+            if contact_type:
+                # Добавляем лид
+                success = add_lead(contact, contact_type, user_id, user.username or "")
+                if success:
+                    leads_added.append({
+                        "contact": contact,
+                        "type": contact_type,
+                        "type_name": LEAD_TYPES[contact_type]["name"]
+                    })
+        
+        # Уведомления о дубликатах
+        if duplicates_found:
+            for dup in duplicates_found:
+                await bot.send_message(
+                    chat_id=SUPPORT_GROUP_ID,
+                    message_thread_id=LEADS_TOPIC_ID,
+                    text=(
+                        f"⚠️ Дубликат лида!\n\n"
+                        f"📋 Лид: {dup['contact']}\n"
+                        f"📦 Тип: {dup['type']}\n\n"
+                        f"Попытался добавить:\n"
+                        f"👤 {user.full_name}\n"
+                        f"🆔 ID: {user_id}\n"
+                        f"📱 @{user.username or 'нет'}\n\n"
+                        f"Уже в базе от:\n"
+                        f"🆔 ID: {dup['original_user_id']}\n"
+                        f"📱 @{dup['original_username']}"
+                    ),
+                )
+        
+        # Уведомление о добавленных лидах
+        if leads_added:
+            for lead in leads_added:
+                await bot.send_message(
+                    chat_id=SUPPORT_GROUP_ID,
+                    message_thread_id=LEADS_TOPIC_ID,
+                    text=(
+                        f"✅ Новый лид добавлен!\n\n"
+                        f"📋 Контакт: {lead['contact']}\n"
+                        f"📦 Категория: {lead['type_name']}\n\n"
+                        f"👤 От: {user.full_name}\n"
+                        f"🆔 ID: {user_id}\n"
+                        f"📱 @{user.username or 'нет'}"
+                    ),
+                )
+        
         await state.clear()
         await message.answer(
             "✅ Отчёт отправлен!",
@@ -1924,6 +2450,7 @@ async def main() -> None:
 
     # Создаём CSV если нужно
     ensure_csv_exists()
+    ensure_leads_csv_exists()
 
     bot = Bot(token=token)
     storage = MemoryStorage()
@@ -1936,6 +2463,41 @@ async def main() -> None:
     dp.message.register(on_get_online, Command("get_online"))
     dp.message.register(on_download_db, Command("download_db"))
     dp.message.register(on_stats, Command("stats"))
+    dp.message.register(on_leadstats, Command("leadstats"))
+    dp.message.register(on_download_lead, Command("download_lead"))
+    dp.message.register(on_add_lead_start, Command("add_lead"))
+    dp.message.register(on_delete_lead_start, Command("delete_lead"))
+    
+    # Ручное добавление лида (состояния)
+    dp.message.register(
+        on_add_lead_cancel,
+        ManualLeadStates.waiting_contact,
+        F.text == "⬅️ Отмена",
+    )
+    dp.message.register(
+        on_add_lead_cancel,
+        ManualLeadStates.waiting_category,
+        F.text == "⬅️ Отмена",
+    )
+    dp.message.register(
+        on_add_lead_contact,
+        ManualLeadStates.waiting_contact,
+    )
+    dp.message.register(
+        on_add_lead_category,
+        ManualLeadStates.waiting_category,
+    )
+    
+    # Удаление лида (состояния)
+    dp.message.register(
+        on_delete_lead_cancel,
+        DeleteLeadStates.waiting_contact,
+        F.text == "⬅️ Отмена",
+    )
+    dp.message.register(
+        on_delete_lead_contact,
+        DeleteLeadStates.waiting_contact,
+    )
     
     # Регистрация пользователя
     dp.message.register(on_send_request, F.text == "✅ Отправить приглашение")
