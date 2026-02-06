@@ -1008,7 +1008,7 @@ def get_main_keyboard() -> ReplyKeyboardMarkup:
             [KeyboardButton(text="📦 Получить списки контактов")],
             [KeyboardButton(text="📋 Отчёт по лидам")],
             [KeyboardButton(text="💬 Написать в поддержку")],
-            [KeyboardButton(text="🆕 Получить новые контакты")],
+            [KeyboardButton(text="📊 Статистика лидов")],
         ],
         resize_keyboard=True,
     )
@@ -1066,6 +1066,7 @@ def get_user_choice_keyboard() -> ReplyKeyboardMarkup:
                 KeyboardButton(text="🟠 Одноклассники"),
                 KeyboardButton(text="📧 Почта"),
             ],
+            [KeyboardButton(text="🆕 Получить новые контакты")],
             [KeyboardButton(text="⬅️ Назад")],
         ],
         resize_keyboard=True,
@@ -2312,6 +2313,45 @@ async def on_admin_delete_cancel(message: Message, state: FSMContext) -> None:
     )
 
 
+# ============ СТАТИСТИКА ЛИДОВ ПОЛЬЗОВАТЕЛЯ ============
+
+def _count_user_leads(user_id: int) -> tuple[int, int]:
+    """Возвращает (лидов за сегодня, лидов за всё время) для пользователя."""
+    today = get_current_lead_day()
+    count_today = 0
+    count_all = 0
+    user_id_str = str(user_id)
+    for key, info in LEAD_TYPES.items():
+        csv_path = info["csv"]
+        if os.path.exists(csv_path):
+            rows = _read_csv(csv_path)
+            for row in rows[1:]:
+                if len(row) >= 2 and str(row[1]).strip() == user_id_str:
+                    count_all += 1
+        daily_path = _get_daily_leads_path(key, today)
+        if daily_path and os.path.exists(daily_path):
+            rows = _read_csv(daily_path)
+            for row in rows[1:]:
+                if len(row) >= 2 and str(row[1]).strip() == user_id_str:
+                    count_today += 1
+    return count_today, count_all
+
+
+async def on_user_lead_stats(message: Message) -> None:
+    """Личная статистика лидов пользователя: за сегодня и за всё время."""
+    user = message.from_user
+    if not user or not is_user_approved(user.id):
+        await message.answer("❌ У вас нет доступа к этой функции.")
+        return
+
+    count_today, count_all = await asyncio.to_thread(_count_user_leads, user.id)
+    await message.answer(
+        f"📊 Ваша статистика лидов\n\n"
+        f"📅 Сегодня: {count_today}\n"
+        f"📈 Всего: {count_all}"
+    )
+
+
 # ============ ПОДДЕРЖКА: ХЕНДЛЕРЫ ============
 
 async def on_request_new_contacts(message: Message, bot: Bot) -> None:
@@ -3402,6 +3442,7 @@ async def main() -> None:
     dp.message.register(on_get_base, F.text == "📦 Получить списки контактов")
     dp.message.register(on_report_start, F.text == "📋 Отчёт по лидам")
     dp.message.register(on_support_info, F.text == "💬 Написать в поддержку")
+    dp.message.register(on_user_lead_stats, F.text == "📊 Статистика лидов")
     dp.message.register(on_request_new_contacts, F.text == "🆕 Получить новые контакты")
     dp.message.register(on_back, F.text == "⬅️ Назад")
 
