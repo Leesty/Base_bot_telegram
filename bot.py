@@ -115,6 +115,7 @@ LEAD_TYPES = {
     "vk": {"name": "ВКонтакте", "csv": "leads_vk.csv"},
     "ok": {"name": "Одноклассники", "csv": "leads_ok.csv"},
     "email": {"name": "Почта", "csv": "leads_email.csv"},
+    "self": {"name": "Самостоятельные лиды", "csv": "leads_self.csv"},
 }
 
 # ============ НАЧАЛЬНАЯ ЗАГРУЗКА (ОТКЛЮЧЕНА) ============
@@ -429,8 +430,8 @@ def extract_contacts_from_text(text: str) -> List[str]:
     if not text:
         return contacts
     
-    # @username (Telegram/Instagram)
-    usernames = re.findall(r'@([a-zA-Z0-9_]{3,32})', text)
+    # @username (Telegram/Instagram) — минимум 4 символа
+    usernames = re.findall(r'@([a-zA-Z0-9_]{4,32})', text)
     contacts.extend([u for u in usernames])
     
     # t.me/username или https://t.me/username
@@ -445,13 +446,21 @@ def extract_contacts_from_text(text: str) -> List[str]:
     ig_links = re.findall(r'(?:https?://)?(?:www\.)?instagram\.com/([a-zA-Z0-9_.]+)', text, re.IGNORECASE)
     contacts.extend([u for u in ig_links])
     
-    # Просто слова без @ (минимум 4 символа, только латиница и _)
-    plain_usernames = re.findall(r'\b([a-zA-Z_][a-zA-Z0-9_]{3,31})\b', text)
-    contacts.extend([u for u in plain_usernames if not u.lower() in ('http', 'https', 'telegram', 'instagram')])
-    
     # Телефонные номера (различные форматы)
     phones = re.findall(r'[\+]?[78][\s\-]?[\(]?\d{3}[\)]?[\s\-]?\d{3}[\s\-]?\d{2}[\s\-]?\d{2}', text)
     contacts.extend([p for p in phones])
+    
+    # Простые username без @ (латиница/цифры/_, минимум 4 символа)
+    # Только строки из ОДНОГО слова (не часть предложения)
+    words = text.split()
+    for word in words:
+        # Убираем знаки препинания
+        clean_word = re.sub(r'[^\w]', '', word)
+        # Только латиница, цифры, _
+        if re.match(r'^[a-zA-Z0-9_]{4,32}$', clean_word):
+            # Исключаем стоп-слова
+            if clean_word.lower() not in {'https', 'http', 'telegram', 'instagram', 'whatsapp'}:
+                contacts.append(clean_word)
     
     # Убираем дубликаты с учётом нормализации
     unique = {}
@@ -464,10 +473,10 @@ def extract_contacts_from_text(text: str) -> List[str]:
 
 
 def determine_contact_type(contact: str, user_id: int) -> Optional[str]:
-    """Определяет тип контакта по выданным пользователю базам."""
+    """Определяет тип контакта по выданным пользователю базам (или всей базе)."""
     contact_normalized = normalize_contact(contact)
     
-    # Получаем все контакты, выданные пользователю
+    # Сначала проверяем выданные конкретному пользователю
     for key, info in BASE_TYPES.items():
         csv_path = info["csv"]
         if not os.path.exists(csv_path):
@@ -491,6 +500,23 @@ def determine_contact_type(contact: str, user_id: int) -> Optional[str]:
                             return key
                 except (ValueError, AttributeError):
                     pass
+    
+    # Если не нашли в выданных пользователю — ищем по всей базе
+    for key, info in BASE_TYPES.items():
+        csv_path = info["csv"]
+        if not os.path.exists(csv_path):
+            continue
+        
+        rows = _read_csv(csv_path)
+        for row in rows[1:]:
+            if len(row) < 1:
+                continue
+            value = row[0]
+            value_clean = clean_value(value) or ""
+            value_normalized = normalize_contact(value_clean)
+            
+            if value_normalized == contact_normalized:
+                return key
     
     return None
 
@@ -916,6 +942,7 @@ def get_lead_category_keyboard() -> ReplyKeyboardMarkup:
                 KeyboardButton(text="🟠 Одноклассники"),
                 KeyboardButton(text="📧 Почта"),
             ],
+            [KeyboardButton(text="🔵 Самостоятельные лиды")],
             [KeyboardButton(text="⬅️ Отмена")],
         ],
         resize_keyboard=True,
@@ -1474,6 +1501,7 @@ async def on_add_lead_category(message: Message, state: FSMContext, bot: Bot) ->
         "👥 ВКонтакте": "vk",
         "🟠 Одноклассники": "ok",
         "📧 Почта": "email",
+        "🔵 Самостоятельные лиды": "self",
     }
     
     lead_type = category_map.get(text)
@@ -2077,17 +2105,31 @@ async def on_report_submit(
     target_topic = topic_id if topic_id else REPORTS_TOPIC_ID
     
     try:
+        # Формируем ссылку на пользователя
+        user_link = f'<a href="tg://user?id={user_id}">{user.full_name}</a>'
+        
+        # Формируем текст уведомления
+        notification_text = f"📋 Новый отчёт по лидам!\n\n"
+        notification_text += f"👤 {user_link}\n"
+        notification_text += f"🆔 ID: {user_id}\n"
+        if user.username:
+            notification_text += f"📱 @{user.username}\n"
+        
+        # Добавляем ссылку на топик пользователя, если он существует
+        if topic_id:
+            # Для ссылки на топик нужен chat_id без префикса -100
+            chat_id_short = str(SUPPORT_GROUP_ID).replace("-100", "")
+            topic_link = f"https://t.me/c/{chat_id_short}/{topic_id}"
+            notification_text += f'\n📨 <a href="{topic_link}">Перейти в чат с пользователем</a>'
+        else:
+            notification_text += "\n📨 Файлы ниже ⬇️"
+        
         # Уведомление в топик «Отчёты»
         await bot.send_message(
             chat_id=SUPPORT_GROUP_ID,
             message_thread_id=REPORTS_TOPIC_ID,
-            text=(
-                f"📋 Новый отчёт по лидам!\n\n"
-                f"👤 {user.full_name}\n"
-                f"🆔 ID: {user_id}\n"
-                f"📱 @{user.username or 'нет'}\n\n"
-                f"См. файлы в чате пользователя ⬇️" if topic_id else "Файлы ниже ⬇️"
-            ),
+            text=notification_text,
+            parse_mode="HTML",
         )
         
         # Файлы — в обычный чат поддержки пользователя
@@ -2160,18 +2202,19 @@ async def on_report_submit(
             
             # Определяем тип контакта
             contact_type = determine_contact_type(contact, user_id)
-            if contact_type:
-                # Добавляем лид
-                success = add_lead(contact, contact_type, user_id, user.username or "")
-                if success:
-                    leads_added.append({
-                        "contact": contact,
-                        "type": contact_type,
-                        "type_name": LEAD_TYPES[contact_type]["name"]
-                    })
-            else:
-                # Не удалось определить категорию
-                unrecognized.append(contact)
+            
+            # Если не нашли в базе контактов — добавляем как "Самостоятельный лид"
+            if not contact_type:
+                contact_type = "self"
+            
+            # Добавляем лид
+            success = add_lead(contact, contact_type, user_id, user.username or "")
+            if success:
+                leads_added.append({
+                    "contact": contact,
+                    "type": contact_type,
+                    "type_name": LEAD_TYPES[contact_type]["name"]
+                })
         
         # Уведомления о дубликатах
         if duplicates_found:
@@ -2208,22 +2251,6 @@ async def on_report_submit(
                         f"📱 @{user.username or 'нет'}"
                     ),
                 )
-        
-        # Уведомление о нераспознанных лидах
-        if unrecognized:
-            await bot.send_message(
-                chat_id=SUPPORT_GROUP_ID,
-                message_thread_id=LEADS_TOPIC_ID,
-                text=(
-                    f"⚠️ Не удалось определить категорию\n\n"
-                    f"Лиды: {', '.join(unrecognized)}\n\n"
-                    f"👤 От: {user.full_name}\n"
-                    f"🆔 ID: {user_id}\n"
-                    f"📱 @{user.username or 'нет'}\n\n"
-                    f"❗️ Эти контакты не найдены в выданных пользователю базах.\n"
-                    f"Добавьте вручную через /add_lead"
-                ),
-            )
         
         await state.clear()
         await message.answer(
