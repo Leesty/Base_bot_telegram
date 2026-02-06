@@ -480,9 +480,9 @@ def extract_contacts_from_text(text: str) -> List[str]:
         if clean_u:
             contacts.append(clean_u)
     
-    # Юла / mail.ru (trk.mail.ru, youla.ru) — сохраняем полную ссылку
+    # Юла / mail.ru (trk.mail.ru, la.youla.ru, m.youla.ru, youla.ru и др.) — сохраняем полную ссылку
     yula_links = re.findall(
-        r'https?://(?:trk\.mail\.ru/[\S]+|(?:www\.)?(?:m\.)?youla\.ru/[\S]+)',
+        r'https?://(?:trk\.mail\.ru/[\S]+|(?:[a-zA-Z0-9\-]+\.)?youla\.ru/[\S]+)',
         text,
         re.IGNORECASE,
     )
