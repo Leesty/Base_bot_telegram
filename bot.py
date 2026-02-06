@@ -458,10 +458,12 @@ def extract_contacts_from_text(text: str) -> List[str]:
     tg_links = re.findall(r'(?:https?://)?t\.me/([a-zA-Z0-9_]+)', text, re.IGNORECASE)
     contacts.extend([u for u in tg_links])
     
-    # vk.com/id123 или vk.ru/username — сохраняем vk.ru/username для однозначности
-    vk_links = re.findall(r'(?:https?://)?vk\.(com|ru)/([a-zA-Z0-9_]+)', text, re.IGNORECASE)
+    # vk.com/id123, vk.ru/id_123, vk.ru/username — сохраняем vk.ru/username
+    vk_links = re.findall(r'(?:https?://)?(?:www\.)?vk\.(com|ru)/([a-zA-Z0-9_\-]+)', text, re.IGNORECASE)
     for domain, username in vk_links:
-        contacts.append(f"vk.{domain.lower()}/{username}")
+        clean_id = username.split("?")[0].strip()  # убираем query-параметры
+        if clean_id:
+            contacts.append(f"vk.{domain.lower()}/{clean_id}")
     
     # avito.ru/... (объявления, бренды и т.д.)
     avito_links = re.findall(r'(?:https?://)?(?:www\.)?avito\.ru/([a-zA-Z0-9_/\-]+)', text, re.IGNORECASE)
@@ -472,9 +474,11 @@ def extract_contacts_from_text(text: str) -> List[str]:
             contacts.append(f"avito.ru/{path_clean}")
     
     # instagram.com/username (убираем query-параметры ?igsh=...)
-    ig_links = re.findall(r'(?:https?://)?(?:www\.)?instagram\.com/([a-zA-Z0-9_.]+)', text, re.IGNORECASE)
+    ig_links = re.findall(r'(?:https?://)?(?:www\.)?instagram\.com/([a-zA-Z0-9_.\-]+)', text, re.IGNORECASE)
     for u in ig_links:
-        contacts.append(u.split("?")[0].strip())  # только username, без параметров
+        clean_u = u.split("?")[0].strip().rstrip("/")
+        if clean_u:
+            contacts.append(clean_u)
     
     # Юла / mail.ru (trk.mail.ru, youla.ru) — сохраняем полную ссылку
     yula_links = re.findall(
@@ -2173,7 +2177,7 @@ async def on_report_file(
     
     file_id = None
     file_type = None
-    caption = (message.caption or "").strip()
+    caption = _extract_text_with_urls(message) or (message.caption or "").strip()
     if message.photo:
         file_id = message.photo[-1].file_id
         file_type = "photo"
@@ -2437,14 +2441,28 @@ async def on_report_cancel(message: Message, state: FSMContext) -> None:
     await message.answer("Отмена.", reply_markup=get_main_keyboard())
 
 
+def _extract_text_with_urls(message: Message) -> str:
+    """Извлекает весь текст + URL из entities (на случай скрытых/форматированных ссылок)."""
+    text = (message.text or message.caption or "").strip()
+    # Добавляем URL из text_link entities (если ссылка под другим текстом)
+    urls = []
+    for entity in (message.entities or message.caption_entities or []):
+        if hasattr(entity, "url") and entity.url:
+            urls.append(entity.url)
+    if urls:
+        text = (text + "\n" + "\n".join(urls)).strip()
+    return text
+
+
 async def on_report_other(message: Message, state: FSMContext) -> None:
     """Текстовые сообщения в режиме отчёта — добавляем в отчёт."""
-    if not message.text or not message.text.strip():
+    content = _extract_text_with_urls(message)
+    if not content:
         return
     
     data = await state.get_data()
     items = data.get("report_items", [])
-    items.append({"type": "text", "content": message.text.strip()})
+    items.append({"type": "text", "content": content})
     await state.update_data(report_items=items)
     await message.answer("✅ Добавлено. Нажмите «Отправить отчёт», когда всё загрузите.")
 
