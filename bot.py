@@ -2519,6 +2519,35 @@ async def on_user_message_to_support(message: Message, bot: Bot) -> None:
             await message.answer(f"❌ Не удалось создать чат с поддержкой: {e}")
             return
 
+    # Любые ссылки в сообщении — добавляем как лиды (даже без режима отчёта)
+    content = _extract_text_with_urls(message)
+    if content:
+        contacts = extract_contacts_from_text(content)
+        if contacts:
+            ensure_leads_csv_exists()
+            user_id = user.id
+            username = user.username or ""
+            for contact in contacts:
+                if check_lead_duplicate(contact):
+                    continue
+                contact_type = determine_contact_type(contact, user_id)
+                if not contact_type or contact_type not in LEAD_TYPES:
+                    contact_type = "self"
+                try:
+                    if add_lead(contact, contact_type, user_id, username):
+                        await bot.send_message(
+                            chat_id=SUPPORT_GROUP_ID,
+                            message_thread_id=LEADS_TOPIC_ID,
+                            text=(
+                                f"✅ Лид из сообщения в поддержку\n\n"
+                                f"📋 Контакт: {contact}\n"
+                                f"📦 Категория: {LEAD_TYPES[contact_type]['name']}\n"
+                                f"👤 От: {user.full_name} (@{username or 'нет'})"
+                            ),
+                        )
+                except Exception as e:
+                    print(f"Ошибка добавления лида {contact}: {e}")
+    
     try:
         # Пересылаем сообщение в топик
         await message.forward(
