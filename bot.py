@@ -2978,7 +2978,7 @@ async def on_report_category_callback(callback: CallbackQuery, state: FSMContext
         items = data.get("report_items", [])
         count = len(items)
         await callback.message.answer(
-            f"✅ Выбор сохранён. В отчёте {count} из {REPORT_LEADS_LIMIT} лидов.\n\n"
+            f"✅ Лид сохранён. В отчёте {count} из {REPORT_LEADS_LIMIT} лидов.\n\n"
             "👇 Кнопки «Отправить отчёт» и «Отмена» — ниже",
             reply_markup=get_report_keyboard(),
         )
