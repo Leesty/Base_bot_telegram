@@ -2418,6 +2418,7 @@ async def on_user_lead_stats(message: Message) -> None:
         f"📈 За весь период: {count_all}\n"
         f"📅 За вчерашний день: {count_yesterday}\n"
         f"📅 За сегодняшний день: {count_today}\n\n"
+        "⏰ День обновляется с 20:00. Лиды после 20:00 будут улетать на следующий день.\n\n"
         "💡 Лид не засчитался? Отправьте его через «Отчёт по лидам»: "
         "скриншот переписки + в подписи контакт (@username, ссылка или телефон). "
         "Не забудьте выбрать нужную категорию для каждого лида.\n\n"
@@ -2573,11 +2574,11 @@ async def _maybe_show_category_for_item(
 
     source_text = item.get("content", "") or item.get("caption", "") or ""
     if not source_text:
-        await message.answer(
-            f"✅ Добавлено. В отчёте {count} из {REPORT_LEADS_LIMIT} лидов. "
-            "Можете загрузить следующий лид или нажать «Отправить отчёт».",
-            reply_markup=get_report_keyboard(),
-        )
+        if count >= REPORT_LEADS_LIMIT:
+            text = f"📋 Достигнут лимит {REPORT_LEADS_LIMIT} лидов в отчёте.\n\nНажмите «Отправить отчёт» для отправки."
+        else:
+            text = f"✅ Добавлено. В отчёте {count} из {REPORT_LEADS_LIMIT} лидов. Можете загрузить следующий лид или нажать «Отправить отчёт»."
+        await message.answer(text, reply_markup=get_report_keyboard())
         return
 
     contacts = extract_contacts_from_text(source_text)
@@ -2601,12 +2602,11 @@ async def _maybe_show_category_for_item(
             pending.append(contact)
 
     if dup_msg and not pending:
-        await message.answer(
-            f"⚠️ Эти контакты уже в базе: {', '.join(dup_msg)}\n\n"
-            f"В отчёте {count} из {REPORT_LEADS_LIMIT} лидов. "
-            "Можете загрузить следующий лид или нажать «Отправить отчёт».",
-            reply_markup=get_report_keyboard(),
-        )
+        if count >= REPORT_LEADS_LIMIT:
+            text = f"⚠️ Эти контакты уже в базе: {', '.join(dup_msg)}\n\n📋 Достигнут лимит {REPORT_LEADS_LIMIT} лидов. Нажмите «Отправить отчёт» для отправки."
+        else:
+            text = f"⚠️ Эти контакты уже в базе: {', '.join(dup_msg)}\n\nВ отчёте {count} из {REPORT_LEADS_LIMIT} лидов. Можете загрузить следующий лид или нажать «Отправить отчёт»."
+        await message.answer(text, reply_markup=get_report_keyboard())
         return
 
     if pending:
@@ -2634,11 +2634,11 @@ async def _maybe_show_category_for_item(
             reply_markup=get_report_category_inline_keyboard(0),
         )
     elif not dup_msg:
-        await message.answer(
-            f"✅ Добавлено. В отчёте {count} из {REPORT_LEADS_LIMIT} лидов. "
-            "Можете загрузить следующий лид или нажать «Отправить отчёт».",
-            reply_markup=get_report_keyboard(),
-        )
+        if count >= REPORT_LEADS_LIMIT:
+            text = f"📋 Достигнут лимит {REPORT_LEADS_LIMIT} лидов в отчёте.\n\nНажмите «Отправить отчёт» для отправки."
+        else:
+            text = f"✅ Добавлено. В отчёте {count} из {REPORT_LEADS_LIMIT} лидов. Можете загрузить следующий лид или нажать «Отправить отчёт»."
+        await message.answer(text, reply_markup=get_report_keyboard())
 
 
 async def on_report_file(
@@ -2977,12 +2977,19 @@ async def on_report_category_callback(callback: CallbackQuery, state: FSMContext
         )
         items = data.get("report_items", [])
         count = len(items)
-        await callback.message.answer(
-            f"✅ Лид сохранён. В отчёте {count} из {REPORT_LEADS_LIMIT} лидов.\n\n"
-            "Можете прислать ещё лид (скриншот + тег) или отправить отчёт.\n\n"
-            "👇 Кнопки «Отправить отчёт» и «Отмена» — ниже",
-            reply_markup=get_report_keyboard(),
-        )
+        if count >= REPORT_LEADS_LIMIT:
+            text = (
+                f"📋 Достигнут лимит {REPORT_LEADS_LIMIT} лидов в отчёте.\n\n"
+                "Нажмите «Отправить отчёт» для отправки.\n\n"
+                "👇 Кнопки «Отправить отчёт» и «Отмена» — ниже"
+            )
+        else:
+            text = (
+                f"✅ Лид сохранён. В отчёте {count} из {REPORT_LEADS_LIMIT} лидов.\n\n"
+                "Можете прислать ещё лид (скриншот + тег) или отправить отчёт.\n\n"
+                "👇 Кнопки «Отправить отчёт» и «Отмена» — ниже"
+            )
+        await callback.message.answer(text, reply_markup=get_report_keyboard())
 
 
 async def on_report_waiting_category_remind(message: Message, state: FSMContext) -> None:
