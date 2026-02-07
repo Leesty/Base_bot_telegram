@@ -413,6 +413,13 @@ def get_current_lead_day() -> str:
     return now.date().strftime("%Y-%m-%d")
 
 
+def get_yesterday_lead_day() -> str:
+    """Возвращает дату вчерашнего «дня» для лидов."""
+    today = get_current_lead_day()
+    d = datetime.strptime(today, "%Y-%m-%d").date() - timedelta(days=1)
+    return d.strftime("%Y-%m-%d")
+
+
 def _get_daily_leads_path(lead_type: str, date: str) -> str:
     """Путь к дневному CSV для категории лидов."""
     info = LEAD_TYPES.get(lead_type)
@@ -2370,10 +2377,12 @@ async def on_admin_delete_cancel(message: Message, state: FSMContext) -> None:
 
 # ============ СТАТИСТИКА ЛИДОВ ПОЛЬЗОВАТЕЛЯ ============
 
-def _count_user_leads(user_id: int) -> tuple[int, int]:
-    """Возвращает (лидов за сегодня, лидов за всё время) для пользователя."""
+def _count_user_leads(user_id: int) -> tuple[int, int, int]:
+    """Возвращает (лидов за сегодня, за вчера, за всё время) для пользователя."""
     today = get_current_lead_day()
+    yesterday = get_yesterday_lead_day()
     count_today = 0
+    count_yesterday = 0
     count_all = 0
     user_id_str = str(user_id)
     for key, info in LEAD_TYPES.items():
@@ -2383,13 +2392,17 @@ def _count_user_leads(user_id: int) -> tuple[int, int]:
             for row in rows[1:]:
                 if len(row) >= 2 and str(row[1]).strip() == user_id_str:
                     count_all += 1
-        daily_path = _get_daily_leads_path(key, today)
-        if daily_path and os.path.exists(daily_path):
-            rows = _read_csv(daily_path)
-            for row in rows[1:]:
-                if len(row) >= 2 and str(row[1]).strip() == user_id_str:
-                    count_today += 1
-    return count_today, count_all
+        for date, cnt in [(today, "today"), (yesterday, "yesterday")]:
+            daily_path = _get_daily_leads_path(key, date)
+            if daily_path and os.path.exists(daily_path):
+                rows = _read_csv(daily_path)
+                for row in rows[1:]:
+                    if len(row) >= 2 and str(row[1]).strip() == user_id_str:
+                        if cnt == "today":
+                            count_today += 1
+                        else:
+                            count_yesterday += 1
+    return count_today, count_yesterday, count_all
 
 
 async def on_user_lead_stats(message: Message) -> None:
@@ -2399,11 +2412,12 @@ async def on_user_lead_stats(message: Message) -> None:
         await message.answer("❌ У вас нет доступа к этой функции.")
         return
 
-    count_today, count_all = await asyncio.to_thread(_count_user_leads, user.id)
+    count_today, count_yesterday, count_all = await asyncio.to_thread(_count_user_leads, user.id)
     await message.answer(
         f"📊 Ваша статистика лидов\n\n"
-        f"📅 Сегодня: {count_today}\n"
-        f"📈 Всего: {count_all}\n\n"
+        f"📈 За весь период: {count_all}\n"
+        f"📅 За вчерашний день: {count_yesterday}\n"
+        f"📅 За сегодняшний день: {count_today}\n\n"
         "💡 Лид не засчитался? Отправьте его через «Отчёт по лидам»: "
         "скриншот переписки + в подписи контакт (@username, ссылка или телефон). "
         "Не забудьте выбрать нужную категорию для каждого лида.\n\n"
@@ -2438,27 +2452,33 @@ async def on_check_leads(message: Message, bot: Bot) -> None:
 
     await message.answer("⏳ Собираю данные...")
 
-    count_today, count_all = await asyncio.to_thread(_count_user_leads, user_id)
+    count_today, count_yesterday, count_all = await asyncio.to_thread(_count_user_leads, user_id)
     today = get_current_lead_day()
+    yesterday = get_yesterday_lead_day()
 
     text = (
         f"📊 Лиды пользователя {user_name}\n"
         f"🆔 ID: {user_id}\n"
         f"📱 @{username}\n\n"
-        f"📅 За текущий день: {count_today}\n"
-        f"📈 За всё время: {count_all}"
+        f"📈 За весь период: {count_all}\n"
+        f"📅 За вчерашний день: {count_yesterday}\n"
+        f"📅 За сегодняшний день: {count_today}"
     )
     await message.answer(text)
     await asyncio.sleep(FLOOD_DELAY)
 
     try:
         buf_all, name_all = await asyncio.to_thread(_create_user_leads_excel, user_id, True)
-        buf_day, name_day = await asyncio.to_thread(_create_user_leads_excel, user_id, False, today)
+        buf_yesterday, name_yesterday = await asyncio.to_thread(_create_user_leads_excel, user_id, False, yesterday)
+        buf_today, name_today = await asyncio.to_thread(_create_user_leads_excel, user_id, False, today)
         doc_all = BufferedInputFile(buf_all.read(), filename=name_all)
-        doc_day = BufferedInputFile(buf_day.read(), filename=name_day)
-        await message.answer_document(doc_all, caption="📤 Лиды за всё время")
+        doc_yesterday = BufferedInputFile(buf_yesterday.read(), filename=name_yesterday)
+        doc_today = BufferedInputFile(buf_today.read(), filename=name_today)
+        await message.answer_document(doc_all, caption="📤 Лиды за весь период")
         await asyncio.sleep(FLOOD_DELAY)
-        await message.answer_document(doc_day, caption=f"📤 Лиды за {today}")
+        await message.answer_document(doc_yesterday, caption=f"📤 Лиды за вчерашний день ({yesterday})")
+        await asyncio.sleep(FLOOD_DELAY)
+        await message.answer_document(doc_today, caption=f"📤 Лиды за сегодняшний день ({today})")
     except Exception as e:
         await message.answer(f"❌ Ошибка при создании файлов: {e}")
 
@@ -2522,13 +2542,11 @@ async def on_report_start(message: Message, state: FSMContext) -> None:
     await state.update_data(report_items=[], report_contact_categories={})
     await message.answer(
         "📋 Отчёт по лидам\n\n"
-        f"📸 Максимум {REPORT_LEADS_LIMIT} лидов. Один лид = скриншот + контакт в подписи.\n\n"
-        "Формат: скриншот + подпись (@username, ссылка или телефон).\n\n"
-        "Категорию выбирайте для каждого лида — бот сам определит тип по ссылке.\n"
-        "Не пишите «сам», «самостоятельно» — не нужно.\n\n"
-        "🔴 Только скриншоты и контакты, без лишнего текста.\n"
-        "💬 Вопросы — в поддержку или группу «Работа».\n\n"
-        "✅ Всё загрузили? Жми «Отправить отчёт» 👇",
+        "Один лид = 1 скриншот + 1 контакт в подписи к скриншоту. "
+        "Не присылайте несколько контактов к одному скриншоту — лид вам не засчитается.\n\n"
+        "Выбираете скриншот. Делаете подпись к нему. Отправляете боту. Выбираете категорию — один лид готов.\n"
+        "После можете загрузить ещё лиды или отправить отчёт.\n\n"
+        "⚠️ Не нажимайте кнопку «Отправить отчёт» до загрузки лидов.",
         reply_markup=get_report_keyboard(),
     )
 
