@@ -576,7 +576,11 @@ def extract_contacts_from_text(text: str) -> List[str]:
                     if not any(x in cw_lower for x in ('http', 'www', 'tme', 'vkru', 'avitoru')):
                         contacts.append(clean_word)
     
-    # Только ссылки, @username и номера — любые другие слова игнорируются
+    # Если не нашли — пробуем первый токен («@LinaSmirnov тг» → берём @LinaSmirnov)
+    if not contacts and text.strip():
+        tokens = text.strip().split()
+        if len(tokens) > 1:
+            contacts = extract_contacts_from_text(tokens[0])
     
     # Убираем дубликаты с учётом нормализации.
     # При коллизии (одинаковый username на разных платформах) приоритет у формы с явной платформой
@@ -1258,7 +1262,6 @@ def get_report_category_inline_keyboard(idx: int) -> InlineKeyboardMarkup:
             InlineKeyboardButton(text="🟡 Юла", callback_data=prefix + "yula"),
         ],
         [InlineKeyboardButton(text="🟣 Кворк", callback_data=prefix + "kwork")],
-        [InlineKeyboardButton(text="🔵 Самостоятельные", callback_data=prefix + "self")],
         [InlineKeyboardButton(text="⏭ Пропустить", callback_data=prefix + "skip")],
         [InlineKeyboardButton(text="⬅️ Отмена отчёта", callback_data=prefix + "cancel")],
     ])
@@ -2519,14 +2522,12 @@ async def on_report_start(message: Message, state: FSMContext) -> None:
     await state.update_data(report_items=[], report_contact_categories={})
     await message.answer(
         "📋 Отчёт по лидам\n\n"
-        f"📸 Максимум {REPORT_LEADS_LIMIT} лидов в одном отчёте. Один лид = скриншот + контакт.\n\n"
-        "Формат:\n"
-        "1️⃣ Скриншот переписки/результата\n"
-        "2️⃣ Под ним — @username, ссылка или номер телефона\n\n"
-        "🔴 ВАЖНО:\n"
-        "Сюда ТОЛЬКО скриншот + контакт.\n"
-        "БЕЗ описаний, вопросов и комментариев.\n\n"
-        "💬 Вопросы и всё остальное — пишите в поддержку бота или в группу «Работа».\n\n"
+        f"📸 Максимум {REPORT_LEADS_LIMIT} лидов. Один лид = скриншот + контакт в подписи.\n\n"
+        "Формат: скриншот + подпись (@username, ссылка или телефон).\n\n"
+        "Категорию выбирайте для каждого лида — бот сам определит тип по ссылке.\n"
+        "Не пишите «сам», «самостоятельно» — не нужно.\n\n"
+        "🔴 Только скриншоты и контакты, без лишнего текста.\n"
+        "💬 Вопросы — в поддержку или группу «Работа».\n\n"
         "✅ Всё загрузили? Жми «Отправить отчёт» 👇",
         reply_markup=get_report_keyboard(),
     )
@@ -2552,7 +2553,6 @@ async def _maybe_show_category_for_item(
         return
 
     contacts = extract_contacts_from_text(source_text)
-    # Если контакты не распознаны — считаем весь текст одним контактом (test, ник и т.д.)
     if not contacts and source_text.strip():
         contacts = [source_text.strip()]
 
@@ -2604,6 +2604,7 @@ async def _maybe_show_category_for_item(
             "Выберите категорию для добавления лида:",
             reply_markup=get_report_category_inline_keyboard(0),
         )
+        await message.answer("👇 Кнопки «Отправить отчёт» и «Отмена» — ниже", reply_markup=get_report_keyboard())
     elif not dup_msg:
         await message.answer(
             "✅ Добавлено. Можете загрузить следующий лид или нажать «Отправить отчёт».",
@@ -2851,7 +2852,10 @@ async def on_report_submit(
             dup_list = ", ".join(c for c, *_ in duplicates_in_report)
             await message.answer(
                 f"✅ Отчёт отправлен!\n\n"
-                f"⚠️ Не добавлены (уже в базе): {dup_list}",
+                f"⚠️ Не добавлены (уже в базе): {dup_list}\n\n"
+                "💡 Как правильно: скриншот + в подписи контакт (@username, ссылка или телефон). "
+                "Выберите категорию для каждого лида.\n\n"
+                "Не получилось? Пишите в поддержку.",
                 reply_markup=get_main_keyboard(),
             )
         else:
@@ -2934,6 +2938,7 @@ async def on_report_category_callback(callback: CallbackQuery, state: FSMContext
             "Выберите категорию для добавления лида:",
             reply_markup=get_report_category_inline_keyboard(next_idx),
         )
+        await callback.message.answer("👇", reply_markup=get_report_keyboard())
     else:
         # Все контакты из этого лида обработаны — возвращаемся к сбору
         await state.set_state(ReportStates.waiting_report)
@@ -2989,7 +2994,10 @@ async def on_report_waiting_category_remind(message: Message, state: FSMContext)
             )
             return
 
-    await message.answer("👆 Сначала выберите категорию для текущего лида выше, затем можно загрузить следующий.")
+    await message.answer(
+        "👆 Сначала выберите категорию выше, затем можно загрузить следующий.",
+        reply_markup=get_report_keyboard(),
+    )
 
 
 async def on_report_cancel(message: Message, state: FSMContext) -> None:
