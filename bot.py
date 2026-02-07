@@ -1262,7 +1262,6 @@ def get_report_category_inline_keyboard(idx: int) -> InlineKeyboardMarkup:
             InlineKeyboardButton(text="🟡 Юла", callback_data=prefix + "yula"),
         ],
         [InlineKeyboardButton(text="🟣 Кворк", callback_data=prefix + "kwork")],
-        [InlineKeyboardButton(text="⏭ Пропустить", callback_data=prefix + "skip")],
         [InlineKeyboardButton(text="⬅️ Отмена отчёта", callback_data=prefix + "cancel")],
     ])
 
