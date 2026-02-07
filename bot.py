@@ -3601,7 +3601,7 @@ async def main() -> None:
     # «Отправить отчёт» работает и в режиме выбора категории — обработаем, не сломаем бота
     dp.message.register(
         on_report_submit,
-        (StateFilter(ReportStates.waiting_report) | StateFilter(ReportStates.waiting_category)),
+        StateFilter(ReportStates.waiting_report, ReportStates.waiting_category),
         F.text == "📤 Отправить отчёт",
     )
     dp.message.register(
