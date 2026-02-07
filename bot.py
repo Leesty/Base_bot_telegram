@@ -2567,10 +2567,15 @@ async def _maybe_show_category_for_item(
     user_name: str,
 ) -> None:
     """Если в элементе есть контакт — сразу показать выбор категории."""
+    data = await state.get_data()
+    items = data.get("report_items", [])
+    count = len(items)
+
     source_text = item.get("content", "") or item.get("caption", "") or ""
     if not source_text:
         await message.answer(
-            "✅ Добавлено. Можете загрузить следующий лид или нажать «Отправить отчёт».",
+            f"✅ Добавлено. В отчёте {count} из {REPORT_LEADS_LIMIT} лидов. "
+            "Можете загрузить следующий лид или нажать «Отправить отчёт».",
             reply_markup=get_report_keyboard(),
         )
         return
@@ -2598,6 +2603,7 @@ async def _maybe_show_category_for_item(
     if dup_msg and not pending:
         await message.answer(
             f"⚠️ Эти контакты уже в базе: {', '.join(dup_msg)}\n\n"
+            f"В отчёте {count} из {REPORT_LEADS_LIMIT} лидов. "
             "Можете загрузить следующий лид или нажать «Отправить отчёт».",
             reply_markup=get_report_keyboard(),
         )
@@ -2627,10 +2633,10 @@ async def _maybe_show_category_for_item(
             "Выберите категорию для добавления лида:",
             reply_markup=get_report_category_inline_keyboard(0),
         )
-        await message.answer("👇 Кнопки «Отправить отчёт» и «Отмена» — ниже", reply_markup=get_report_keyboard())
     elif not dup_msg:
         await message.answer(
-            "✅ Добавлено. Можете загрузить следующий лид или нажать «Отправить отчёт».",
+            f"✅ Добавлено. В отчёте {count} из {REPORT_LEADS_LIMIT} лидов. "
+            "Можете загрузить следующий лид или нажать «Отправить отчёт».",
             reply_markup=get_report_keyboard(),
         )
 
@@ -2687,15 +2693,16 @@ async def on_report_submit(
 
     data = await state.get_data()
     items = data.get("report_items", [])
-    # Сразу очищаем состояние — защита от двойного нажатия (второе нажатие не обработается)
-    await state.clear()
 
     if not items:
         await message.answer(
-            "Сначала пришлите скриншоты, файлы или текст для отчёта.",
-            reply_markup=get_main_keyboard(),
+            "Вы не добавили ни одного лида. Загрузите скриншоты с контактами, затем нажмите «Отправить отчёт».",
+            reply_markup=get_report_keyboard(),
         )
         return
+
+    # Очищаем состояние — защита от двойного нажатия
+    await state.clear()
     
     user_id = user.id
     topics = load_support_topics()
@@ -2961,7 +2968,6 @@ async def on_report_category_callback(callback: CallbackQuery, state: FSMContext
             "Выберите категорию для добавления лида:",
             reply_markup=get_report_category_inline_keyboard(next_idx),
         )
-        await callback.message.answer("👇", reply_markup=get_report_keyboard())
     else:
         # Все контакты из этого лида обработаны — возвращаемся к сбору
         await state.set_state(ReportStates.waiting_report)
@@ -2969,8 +2975,11 @@ async def on_report_category_callback(callback: CallbackQuery, state: FSMContext
             report_pending_contacts=[],
             report_idx=0,
         )
+        items = data.get("report_items", [])
+        count = len(items)
         await callback.message.answer(
-            "✅ Выбор сохранён. Можете загрузить следующий лид или нажать «Отправить отчёт».",
+            f"✅ Выбор сохранён. В отчёте {count} из {REPORT_LEADS_LIMIT} лидов.\n\n"
+            "👇 Кнопки «Отправить отчёт» и «Отмена» — ниже",
             reply_markup=get_report_keyboard(),
         )
 
