@@ -132,6 +132,7 @@ LEAD_TYPES = {
     "avito": {"name": "Авито", "csv": "leads_avito.csv"},
     "yula": {"name": "Юла", "csv": "leads_yula.csv"},
     "kwork": {"name": "Кворк", "csv": "leads_kwork.csv"},
+    "other_social": {"name": "Прочие соц. сети", "csv": "leads_other_social.csv"},
     "self": {"name": "Самостоятельные лиды", "csv": "leads_self.csv"},
 }
 
@@ -1239,6 +1240,7 @@ def get_lead_category_inline_keyboard() -> InlineKeyboardMarkup:
             InlineKeyboardButton(text="🟡 Юла", callback_data="lead_cat_yula"),
         ],
         [InlineKeyboardButton(text="🟣 Кворк", callback_data="lead_cat_kwork")],
+        [InlineKeyboardButton(text="🌐 Прочие соц. сети", callback_data="lead_cat_other_social")],
         [InlineKeyboardButton(text="🔵 Самостоятельные лиды", callback_data="lead_cat_self")],
         [InlineKeyboardButton(text="⬅️ Отмена", callback_data="lead_cat_cancel")],
     ])
@@ -1269,6 +1271,7 @@ def get_report_category_inline_keyboard(idx: int) -> InlineKeyboardMarkup:
             InlineKeyboardButton(text="🟡 Юла", callback_data=prefix + "yula"),
         ],
         [InlineKeyboardButton(text="🟣 Кворк", callback_data=prefix + "kwork")],
+        [InlineKeyboardButton(text="🌐 Прочие соц. сети", callback_data=prefix + "other_social")],
         [InlineKeyboardButton(text="⬅️ Отмена отчёта", callback_data=prefix + "cancel")],
     ])
 
