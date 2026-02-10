@@ -872,6 +872,63 @@ def _add_new_values(csv_path: str, new_values: List[str]) -> int:
     return added
 
 
+def _process_excel_upload_sync(file_bytes: bytes, upload_type: str) -> tuple[List[str], Optional[str]]:
+    """
+    Синхронная обработка загруженного Excel (запускается в отдельном потоке,
+    чтобы не блокировать бота при больших файлах). Возвращает (список результатов, ошибка или None).
+    """
+    try:
+        wb = load_workbook(io.BytesIO(file_bytes), read_only=True)
+        results = []
+
+        if upload_type == "all":
+            for sheet_name in wb.sheetnames:
+                base_key = EXCEL_SHEET_MAP.get(sheet_name)
+                if not base_key:
+                    results.append(f"⚠️ Лист «{sheet_name}» — неизвестный тип, пропущен")
+                    continue
+
+                ws = wb[sheet_name]
+                new_values = []
+                for row in ws.iter_rows(min_row=2, values_only=True):
+                    val = clean_value(row[0] if row else None)
+                    if val and val.lower() not in ("value", "значение", "контакт", "данные"):
+                        new_values.append(val)
+
+                if new_values:
+                    csv_path = BASE_TYPES[base_key]["csv"]
+                    added = _add_new_values(csv_path, new_values)
+                    info = BASE_TYPES[base_key]
+                    results.append(
+                        f"✅ «{info['name']}» — добавлено {added} из {len(new_values)}"
+                    )
+                else:
+                    results.append(f"⚠️ Лист «{sheet_name}» — пустой")
+        else:
+            ws = wb.active
+            new_values = []
+            for row in ws.iter_rows(min_row=2, values_only=True):
+                val = clean_value(row[0] if row else None)
+                if val and val.lower() not in ("value", "значение", "контакт", "данные"):
+                    new_values.append(val)
+
+            if new_values:
+                csv_path = BASE_TYPES[upload_type]["csv"]
+                added = _add_new_values(csv_path, new_values)
+                info = BASE_TYPES[upload_type]
+                results.append(
+                    f"✅ «{info['name']}» — добавлено {added} из {len(new_values)} "
+                    f"(дубликатов пропущено: {len(new_values) - added})"
+                )
+            else:
+                results.append("⚠️ Файл пустой или не содержит данных в первом столбце")
+
+        wb.close()
+        return (results, None)
+    except Exception as e:
+        return ([], str(e))
+
+
 # ============ ВЫДАЧА ДАННЫХ ============
 
 async def allocate_for_user(base_key: str, user_id: int, username: str) -> tuple[List[str], str]:
@@ -2251,7 +2308,7 @@ async def on_admin_file_received(message: Message, state: FSMContext, bot: Bot) 
         return
 
     # Скачиваем файл
-    await message.answer("⏳ Обрабатываю файл...")
+    await message.answer("⏳ Обрабатываю файл... (большой файл может занять несколько минут)")
 
     try:
         file_io = await bot.download(message.document)
@@ -2259,55 +2316,13 @@ async def on_admin_file_received(message: Message, state: FSMContext, bot: Bot) 
             await message.answer("Не удалось скачать файл.")
             return
 
-        wb = load_workbook(file_io, read_only=True)
+        file_bytes = file_io.read()
+        results, err = await asyncio.to_thread(_process_excel_upload_sync, file_bytes, upload_type)
 
-        results = []
-
-        if upload_type == "all":
-            # Обрабатываем все листы
-            for sheet_name in wb.sheetnames:
-                base_key = EXCEL_SHEET_MAP.get(sheet_name)
-                if not base_key:
-                    results.append(f"⚠️ Лист «{sheet_name}» — неизвестный тип, пропущен")
-                    continue
-
-                ws = wb[sheet_name]
-                new_values = []
-                for row in ws.iter_rows(min_row=2, values_only=True):  # min_row=2 — пропускаем заголовок
-                    val = clean_value(row[0] if row else None)
-                    if val and val.lower() not in ("value", "значение", "контакт", "данные"):
-                        new_values.append(val)
-
-                if new_values:
-                    csv_path = BASE_TYPES[base_key]["csv"]
-                    added = _add_new_values(csv_path, new_values)
-                    info = BASE_TYPES[base_key]
-                    results.append(
-                        f"✅ «{info['name']}» — добавлено {added} из {len(new_values)}"
-                    )
-                else:
-                    results.append(f"⚠️ Лист «{sheet_name}» — пустой")
-        else:
-            # Обрабатываем первый лист для конкретного типа
-            ws = wb.active
-            new_values = []
-            for row in ws.iter_rows(min_row=2, values_only=True):  # min_row=2 — пропускаем заголовок
-                val = clean_value(row[0] if row else None)
-                if val and val.lower() not in ("value", "значение", "контакт", "данные"):
-                    new_values.append(val)
-
-            if new_values:
-                csv_path = BASE_TYPES[upload_type]["csv"]
-                added = _add_new_values(csv_path, new_values)
-                info = BASE_TYPES[upload_type]
-                results.append(
-                    f"✅ «{info['name']}» — добавлено {added} из {len(new_values)} "
-                    f"(дубликатов пропущено: {len(new_values) - added})"
-                )
-            else:
-                results.append("⚠️ Файл пустой или не содержит данных в первом столбце")
-
-        wb.close()
+        if err:
+            await message.answer(f"❌ Ошибка при обработке файла: {err}")
+            await state.clear()
+            return
 
         await state.clear()
         await message.answer(
