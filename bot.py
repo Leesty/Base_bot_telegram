@@ -78,7 +78,7 @@ LEAD_DAY_CUTOFF_HOUR = 20
 BOT_DISABLED = True
 BOT_DISABLED_MESSAGE = (
     "Бот больше не работает. Теперь отправляем лиды через сайт "
-    "https://leesty-site-contacts-8159.twc1.net/ . По вопросам писать менеджерам"
+    "https://leesty-site-contacts-8159.twc1.net/ . По вопросам писать куратору"
 )
 
 # Пауза между сообщениями в группу (защита от Flood control)
