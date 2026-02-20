@@ -74,6 +74,13 @@ LEADS_TOPIC_ID = 769
 LEAD_TIMEZONE = "Europe/Moscow"
 LEAD_DAY_CUTOFF_HOUR = 20
 
+# Бот отключён — на все действия пользователя выводится сообщение с переходом на сайт
+BOT_DISABLED = True
+BOT_DISABLED_MESSAGE = (
+    "Бот больше не работает. Теперь отправляем лиды через сайт "
+    "https://leesty-site-contacts-8159.twc1.net/ . По вопросам писать менеджерам"
+)
+
 # Пауза между сообщениями в группу (защита от Flood control)
 FLOOD_DELAY = 0.4
 
@@ -1362,6 +1369,17 @@ ADMIN_UPLOAD_MAP = {
 
 
 # ============ ХЕНДЛЕРЫ ============
+
+async def on_bot_disabled(message: Message, bot: Bot) -> None:
+    """Ответ на любое сообщение пользователя, когда бот отключён."""
+    await message.answer(BOT_DISABLED_MESSAGE)
+
+
+async def on_bot_disabled_callback(callback: CallbackQuery, bot: Bot) -> None:
+    """Ответ на любой callback (нажатие кнопки), когда бот отключён."""
+    await callback.answer()
+    await callback.message.answer(BOT_DISABLED_MESSAGE)
+
 
 async def on_start(message: Message, state: FSMContext, bot: Bot) -> None:
     await state.clear()
@@ -3520,6 +3538,11 @@ async def main() -> None:
     bot = Bot(token=token)
     storage = MemoryStorage()
     dp = Dispatcher(storage=storage)
+
+    # Бот отключён: ловим все действия в личных чатах первыми
+    if BOT_DISABLED:
+        dp.message.register(on_bot_disabled, F.chat.type == "private")
+        dp.callback_query.register(on_bot_disabled_callback, F.message.chat.type == "private")
 
     # Базовые команды
     dp.message.register(on_start, CommandStart())
